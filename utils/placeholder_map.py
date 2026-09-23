@@ -29,27 +29,27 @@ PLACEHOLDER_MAP = [
     {"key": "OLT_OM_GW", "label": "OLT OM Gateway", "source": "FIO", "group": "Network Elements"},
     {"key": "OLT_UPLINK_PORT", "label": "OLT Uplink Port", "source": "EWP", "group": "Network Elements", "default": "1/1/1"},
     {"key": "OLT_LAG_ID", "label": "OLT LAG ID", "source": "EWP", "group": "Network Elements", "default": "10"},
-    {"key": "OLT_SW_VERSION", "label": "OLT SW Version", "source": "EWP", "group": "Network Elements"},
-    {"key": "OLT_SW_VERSION_SHORT", "label": "OLT SW Version (Short)", "source": "EWP", "group": "Network Elements"},
+    {"key": "OLT_SW_VERSION", "label": "OLT SW Version", "source": "EWP", "group": "Network Elements", "default": "L6GQFC24.298"},
+    {"key": "OLT_SW_VERSION_SHORT", "label": "OLT SW Version (Short)", "source": "EWP", "group": "Network Elements", "default": "24.6"},
     {"key": "AN_SITE", "label": "AN Site", "source": "FIO", "group": "Network Elements"},
     {"key": "AN_PRODUCT", "label": "AN Product", "source": "EWP", "group": "Network Elements", "default": "ATN 980C"},
     {"key": "AN_PRODUCT_FAMILY", "label": "AN Product Family", "source": "EWP", "group": "Network Elements", "default": "ATN Series Equipment"},
     {"key": "AN_TRUNK_ID", "label": "AN Trunk ID", "source": "FIO", "group": "Network Elements"},
     {"key": "AN_UPLINK_PORT", "label": "AN Uplink Port", "source": "FIO", "group": "Network Elements"},
-    {"key": "AN_LOOPBACK0", "label": "AN Loopback0", "source": "EWP", "group": "Network Elements"},
-    {"key": "AN_LOOPBACK1", "label": "AN Loopback1", "source": "EWP", "group": "Network Elements"},
+    {"key": "AN_LOOPBACK0", "label": "AN Loopback0", "source": "EWP", "group": "Network Elements", "default": "10.175.4.57"},
+    {"key": "AN_LOOPBACK1", "label": "AN Loopback1", "source": "EWP", "group": "Network Elements", "default": "10.175.8.57"},
     {"key": "AG1_NODE", "label": "AG1 Node", "source": "FIO", "group": "Network Elements"},
     {"key": "AG2_NODE", "label": "AG2 Node", "source": "FIO", "group": "Network Elements"},
     {"key": "AG_SYSTEM", "label": "AG System", "source": "EWP", "group": "Network Elements", "default": "CX600(V8)"},
     {"key": "AG_PRODUCT", "label": "AG Product", "source": "EWP", "group": "Network Elements", "default": "CX600 Series Equipment"},
     {"key": "AG_MODEL", "label": "AG Model", "source": "EWP", "group": "Network Elements", "default": "CX600-X8(V8)"},
-    {"key": "AG_SW_VERSION", "label": "AG SW Version", "source": "EWP", "group": "Network Elements"},
-    {"key": "AG1_IP", "label": "AG1 IP", "source": "EWP", "group": "Network Elements"},
-    {"key": "AG2_IP", "label": "AG2 IP", "source": "EWP", "group": "Network Elements"},
-    {"key": "AG1_LOOPBACK0", "label": "AG1 Loopback0", "source": "EWP", "group": "Network Elements"},
-    {"key": "AG1_LOOPBACK1", "label": "AG1 Loopback1", "source": "EWP", "group": "Network Elements"},
-    {"key": "AG2_LOOPBACK0", "label": "AG2 Loopback0", "source": "EWP", "group": "Network Elements"},
-    {"key": "AG2_LOOPBACK1", "label": "AG2 Loopback1", "source": "EWP", "group": "Network Elements"},
+    {"key": "AG_SW_VERSION", "label": "AG SW Version", "source": "EWP", "group": "Network Elements", "default": "V600R008C10"},
+    {"key": "AG1_IP", "label": "AG1 IP", "source": "EWP", "group": "Network Elements", "default": "10.175.0.9"},
+    {"key": "AG2_IP", "label": "AG2 IP", "source": "EWP", "group": "Network Elements", "default": "10.175.0.5"},
+    {"key": "AG1_LOOPBACK0", "label": "AG1 Loopback0", "source": "EWP", "group": "Network Elements", "default": "10.175.0.9"},
+    {"key": "AG1_LOOPBACK1", "label": "AG1 Loopback1", "source": "EWP", "group": "Network Elements", "default": "10.175.1.9"},
+    {"key": "AG2_LOOPBACK0", "label": "AG2 Loopback0", "source": "EWP", "group": "Network Elements", "default": "10.175.0.5"},
+    {"key": "AG2_LOOPBACK1", "label": "AG2 Loopback1", "source": "EWP", "group": "Network Elements", "default": "10.175.1.5"},
 
     # ============================================================
     # VLAN & VSI
@@ -59,27 +59,27 @@ PLACEHOLDER_MAP = [
     {"key": "VLAN_HSI", "label": "HSI VLAN", "source": "FIO", "group": "VLAN & VSI"},
     {"key": "VLAN_IPOE1", "label": "IPOE1 VLAN", "source": "FIO", "group": "VLAN & VSI"},
     {"key": "VLAN_IPOE2", "label": "IPOE2 VLAN", "source": "FIO", "group": "VLAN & VSI"},
-    {"key": "VSI_OM", "label": "OM VSI Name", "source": "EWP", "group": "VLAN & VSI"},
-    {"key": "VSI_SIP", "label": "SIP VSI Name", "source": "EWP", "group": "VLAN & VSI"},
-    {"key": "VSI_HSI", "label": "HSI VSI Name", "source": "EWP", "group": "VLAN & VSI"},
-    {"key": "VSI_IPOE1", "label": "IPOE1 VSI Name", "source": "EWP", "group": "VLAN & VSI"},
-    {"key": "VSI_IPOE2", "label": "IPOE2 VSI Name", "source": "EWP", "group": "VLAN & VSI"},
-    {"key": "BNG_PEER_OM", "label": "BNG Peer IP (OM)", "source": "EWP", "group": "VLAN & VSI"},
-    {"key": "BNG_PEER_SIP", "label": "BNG Peer IP (SIP)", "source": "EWP", "group": "VLAN & VSI"},
-    {"key": "BNG_PEER_HSI", "label": "BNG Peer IP (HSI)", "source": "EWP", "group": "VLAN & VSI"},
-    {"key": "BNG_PEER_SIP_HSI", "label": "BNG Peer IP (SIP/HSI L2)", "source": "EWP", "group": "VLAN & VSI"},
-    {"key": "BNG_PEER_IPOE1", "label": "BNG Peer IP (IPOE1)", "source": "EWP", "group": "VLAN & VSI"},
-    {"key": "BNG_PEER_IPOE2", "label": "BNG Peer IP (IPOE2)", "source": "EWP", "group": "VLAN & VSI"},
-    {"key": "VCID_OM_PRIMARY", "label": "VCID OM Primary", "source": "EWP", "group": "VLAN & VSI"},
-    {"key": "VCID_OM_SECONDARY", "label": "VCID OM Secondary", "source": "EWP", "group": "VLAN & VSI"},
-    {"key": "VCID_SIP_PRIMARY", "label": "VCID SIP Primary", "source": "EWP", "group": "VLAN & VSI"},
-    {"key": "VCID_SIP_SECONDARY", "label": "VCID SIP Secondary", "source": "EWP", "group": "VLAN & VSI"},
-    {"key": "VCID_HSI_PRIMARY", "label": "VCID HSI Primary", "source": "EWP", "group": "VLAN & VSI"},
-    {"key": "VCID_HSI_SECONDARY", "label": "VCID HSI Secondary", "source": "EWP", "group": "VLAN & VSI"},
-    {"key": "VCID_IPOE1_PRIMARY", "label": "VCID IPOE1 Primary", "source": "EWP", "group": "VLAN & VSI"},
-    {"key": "VCID_IPOE1_SECONDARY", "label": "VCID IPOE1 Secondary", "source": "EWP", "group": "VLAN & VSI"},
-    {"key": "VCID_IPOE2_PRIMARY", "label": "VCID IPOE2 Primary", "source": "EWP", "group": "VLAN & VSI"},
-    {"key": "VCID_IPOE2_SECONDARY", "label": "VCID IPOE2 Secondary", "source": "EWP", "group": "VLAN & VSI"},
+    {"key": "VSI_OM", "label": "OM VSI Name", "source": "EWP", "group": "VLAN & VSI", "default": "OM-90000734"},
+    {"key": "VSI_SIP", "label": "SIP VSI Name", "source": "EWP", "group": "VLAN & VSI", "default": "SIP-90002109"},
+    {"key": "VSI_HSI", "label": "HSI VSI Name", "source": "EWP", "group": "VLAN & VSI", "default": "HSI-90002112"},
+    {"key": "VSI_IPOE1", "label": "IPOE1 VSI Name", "source": "EWP", "group": "VLAN & VSI", "default": "IPOE-193013368"},
+    {"key": "VSI_IPOE2", "label": "IPOE2 VSI Name", "source": "EWP", "group": "VLAN & VSI", "default": "IPOE-291268368"},
+    {"key": "BNG_PEER_OM", "label": "BNG Peer IP (OM)", "source": "EWP", "group": "VLAN & VSI", "default": "10.175.0.78"},
+    {"key": "BNG_PEER_SIP", "label": "BNG Peer IP (SIP)", "source": "EWP", "group": "VLAN & VSI", "default": "10.168.56.240"},
+    {"key": "BNG_PEER_HSI", "label": "BNG Peer IP (HSI)", "source": "EWP", "group": "VLAN & VSI", "default": "10.168.56.240"},
+    {"key": "BNG_PEER_SIP_HSI", "label": "BNG Peer IP (SIP/HSI L2)", "source": "EWP", "group": "VLAN & VSI", "default": "10.168.56.240"},
+    {"key": "BNG_PEER_IPOE1", "label": "BNG Peer IP (IPOE1)", "source": "EWP", "group": "VLAN & VSI", "default": "10.175.0.77"},
+    {"key": "BNG_PEER_IPOE2", "label": "BNG Peer IP (IPOE2)", "source": "EWP", "group": "VLAN & VSI", "default": "10.168.56.242"},
+    {"key": "VCID_OM_PRIMARY", "label": "VCID OM Primary", "source": "EWP", "group": "VLAN & VSI", "default": "25011194"},
+    {"key": "VCID_OM_SECONDARY", "label": "VCID OM Secondary", "source": "EWP", "group": "VLAN & VSI", "default": "26011194"},
+    {"key": "VCID_SIP_PRIMARY", "label": "VCID SIP Primary", "source": "EWP", "group": "VLAN & VSI", "default": "25011195"},
+    {"key": "VCID_SIP_SECONDARY", "label": "VCID SIP Secondary", "source": "EWP", "group": "VLAN & VSI", "default": "26011195"},
+    {"key": "VCID_HSI_PRIMARY", "label": "VCID HSI Primary", "source": "EWP", "group": "VLAN & VSI", "default": "25011196"},
+    {"key": "VCID_HSI_SECONDARY", "label": "VCID HSI Secondary", "source": "EWP", "group": "VLAN & VSI", "default": "26011196"},
+    {"key": "VCID_IPOE1_PRIMARY", "label": "VCID IPOE1 Primary", "source": "EWP", "group": "VLAN & VSI", "default": "2430132705"},
+    {"key": "VCID_IPOE1_SECONDARY", "label": "VCID IPOE1 Secondary", "source": "EWP", "group": "VLAN & VSI", "default": "2930132705"},
+    {"key": "VCID_IPOE2_PRIMARY", "label": "VCID IPOE2 Primary", "source": "EWP", "group": "VLAN & VSI", "default": "3412682705"},
+    {"key": "VCID_IPOE2_SECONDARY", "label": "VCID IPOE2 Secondary", "source": "EWP", "group": "VLAN & VSI", "default": "3912682705"},
 
     # ============================================================
     # NODE NAMES
@@ -88,13 +88,13 @@ PLACEHOLDER_MAP = [
     {"key": "AGG_NODE_OM", "label": "AGG Node (OM)", "source": "FIO", "group": "Node Names"},
     {"key": "AGG_NODE_IPOE1", "label": "AGG Node (IPOE1)", "source": "FIO", "group": "Node Names"},
     {"key": "BNG_NODE_SIP_HSI", "label": "BNG Node (SIP/HSI)", "source": "FIO", "group": "Node Names"},
-    {"key": "AGG_NODE_SIP_HSI_L2", "label": "AGG Node (SIP/HSI L2)", "source": "EWP", "group": "Node Names"},
+    {"key": "AGG_NODE_SIP_HSI_L2", "label": "AGG Node (SIP/HSI L2)", "source": "EWP", "group": "Node Names", "default": "MINALWANA-FMAGG-002-MIN1092"},
     {"key": "BNG_NODE_IPOE2", "label": "BNG Node (IPOE2)", "source": "FIO", "group": "Node Names"},
     {"key": "OLT_REGION", "label": "OLT Region", "source": "FIO", "group": "Node Names", "default": "MIN"},
-    {"key": "CORE_NODE_1", "label": "Core Node 1", "source": "EWP", "group": "Node Names"},
-    {"key": "CORE_NODE_2", "label": "Core Node 2", "source": "EWP", "group": "Node Names"},
-    {"key": "BNG_NODE", "label": "BNG Node", "source": "EWP", "group": "Node Names"},
-    {"key": "CX600_NODE", "label": "CX600 Node", "source": "EWP", "group": "Node Names"},
+    {"key": "CORE_NODE_1", "label": "Core Node 1", "source": "EWP", "group": "Node Names", "default": "CDO-PS-PTR-002"},
+    {"key": "CORE_NODE_2", "label": "Core Node 2", "source": "EWP", "group": "Node Names", "default": "CDO-PS-PTR-001/002"},
+    {"key": "BNG_NODE", "label": "BNG Node", "source": "EWP", "group": "Node Names", "default": "CDO_CDO_BNG_002"},
+    {"key": "CX600_NODE", "label": "CX600 Node", "source": "EWP", "group": "Node Names", "default": "LAPASA-MIN836-TRS_DC_AG-R1-01"},
 
     # ============================================================
     # CX600 PORTS
@@ -198,3 +198,11 @@ def get_by_group(group):
 
 def get_all_keys():
     return [p["key"] for p in PLACEHOLDER_MAP]
+
+
+def get_default(key):
+    """Return the default value for a placeholder key, or empty string."""
+    for p in PLACEHOLDER_MAP:
+        if p["key"] == key:
+            return p.get("default", "")
+    return ""
