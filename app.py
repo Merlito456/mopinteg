@@ -24,9 +24,8 @@ except Exception:
     get_ocr_text = None
     extract_candidates = None
 
-from utils.ai_prompt import (
-    GEMINI_PROMPT_TEMPLATE, parse_ai_response
-)
+from utils.ai_prompt import GEMINI_PROMPT_TEMPLATE, parse_ai_response
+
 
 # ============================================================
 # CONFIG
@@ -39,6 +38,7 @@ st.set_page_config(
 )
 
 TEMPLATE_PATH = "template/MOP_INTEGRATION_TEMPLATE.docx"
+
 
 # ============================================================
 # SESSION STATE
@@ -60,19 +60,23 @@ if "generated_file" not in st.session_state:
 if "ai_paste_result" not in st.session_state:
     st.session_state.ai_paste_result = None
 
+
 # ============================================================
 # HELPERS
 # ============================================================
 def set_value(key, value):
     st.session_state.placeholder_values[key] = value
 
+
 def get_value(key, default=""):
     return st.session_state.placeholder_values.get(key, default)
+
 
 def reset_app():
     for key in list(st.session_state.keys()):
         del st.session_state[key]
     st.rerun()
+
 
 # ============================================================
 # HEADER
@@ -90,6 +94,7 @@ st.markdown(
     """
 )
 
+
 # ============================================================
 # SIDEBAR
 # ============================================================
@@ -98,7 +103,11 @@ with st.sidebar:
 
     st.markdown("### Step 1 — Upload Files")
     fio_file = st.file_uploader("Upload FIO (.xlsx)", type=["xlsx"], key="fio_uploader")
-    ewp_image = st.file_uploader("Upload EWP Image (.jpg/.png)", type=["jpg", "jpeg", "png"], key="ewp_uploader")
+    ewp_image = st.file_uploader(
+        "Upload EWP Image (.jpg/.png)",
+        type=["jpg", "jpeg", "png"],
+        key="ewp_uploader",
+    )
 
     st.markdown("---")
     st.markdown("### Step 2 — Review & Edit")
@@ -106,7 +115,12 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### Step 3 — Generate MOP")
-    generate_btn = st.button("🚀 Generate MOP", use_container_width=True, type="primary", key="generate_btn")
+    generate_btn = st.button(
+        "🚀 Generate MOP",
+        use_container_width=True,
+        type="primary",
+        key="generate_btn",
+    )
 
     st.markdown("---")
     if st.button("🔄 Reset App", use_container_width=True, key="reset_btn"):
@@ -120,6 +134,7 @@ with st.sidebar:
         f"- Template: {'✅ Found' if os.path.exists(TEMPLATE_PATH) else '❌ Missing'}\n"
         f"- OCR Engine: {'✅ Available' if EWP_OCR_AVAILABLE else '⚠️ Unavailable'}"
     )
+
 
 # ============================================================
 # PARSE FIO
@@ -136,6 +151,7 @@ if fio_file and not st.session_state.fio_uploaded:
             st.error(f"❌ Failed to parse FIO: {e}")
             st.exception(e)
 
+
 # ============================================================
 # STORE EWP IMAGE + AUTO-PARSE VIA OCR
 # ============================================================
@@ -148,11 +164,9 @@ if ewp_image and not st.session_state.ewp_uploaded:
         if EWP_OCR_AVAILABLE:
             with st.spinner("🔍 Extracting values from EWP image (OCR)..."):
                 try:
-                    # Extract candidates (all matches, for dropdowns)
                     candidates = extract_candidates(ewp_bytes)
                     st.session_state.ewp_candidates = candidates
 
-                    # Extract single best value
                     ewp_parsed = parse_ewp(ewp_bytes)
                     ocr_raw = get_ocr_text(ewp_bytes)
                     st.session_state.ewp_ocr_text = ocr_raw
@@ -175,6 +189,7 @@ if ewp_image and not st.session_state.ewp_uploaded:
         st.error(f"❌ Failed to load EWP image: {e}")
         st.exception(e)
 
+
 # ============================================================
 # TABS
 # ============================================================
@@ -187,6 +202,7 @@ tab_fio, tab_ewp, tab_ai, tab_doc, tab_preview, tab_generate, tab_ocr = st.tabs(
     "📄 Generate",
     "🔍 OCR Debug",
 ])
+
 
 # ============================================================
 # TAB 1: FIO-MAPPED
@@ -209,6 +225,7 @@ with tab_fio:
                         val = st.text_input(label, value=get_value(key), key=f"fio_{key}")
                         if val != get_value(key):
                             set_value(key, val)
+
 
 # ============================================================
 # TAB 2: EWP-ONLY (DROPDOWN)
@@ -235,7 +252,6 @@ with tab_ewp:
 
                 with cols[i % 2]:
                     if candidates and len(candidates) > 1:
-                        # Dropdown mode
                         options = ["(none)"] + candidates
                         default_idx = options.index(current) if current in options else 0
                         pick = st.selectbox(
@@ -246,7 +262,6 @@ with tab_ewp:
                         )
                         new_val = "" if pick == "(none)" else pick
                     else:
-                        # Text input with candidate hint
                         hint = candidates[0] if candidates else ""
                         new_val = st.text_input(
                             label,
@@ -256,6 +271,7 @@ with tab_ewp:
                         )
                     if new_val != current:
                         set_value(key, new_val)
+
 
 # ============================================================
 # TAB 3: AI PASTE
@@ -270,7 +286,7 @@ with tab_ai:
     st.markdown("### Step 1 — Copy this prompt to Gemini")
     st.code(GEMINI_PROMPT_TEMPLATE, language="markdown")
 
-    st.markdown("### Step 2 — Upload FIO + EWP to Gemini and paste the response below")
+    st.markdown("### Step 2 — Upload FIO + EWP to Gemini, then paste the response below")
 
     ai_response = st.text_area(
         "Paste Gemini JSON response here",
@@ -287,13 +303,46 @@ with tab_ai:
             else:
                 try:
                     parsed = parse_ai_response(ai_response)
-                    applied = 0
+
+                    # Apply each value — only if key is in our placeholder map
+                    applied_keys = []
+                    unknown_keys = []
                     for k, v in parsed.items():
-                        set_value(k, v)
-                        applied += 1
-                    st.success(f"✅ Applied {applied} values from AI response")
-                except Exception as e:
+                        if any(p["key"] == k for p in PLACEHOLDER_MAP):
+                            set_value(k, v)
+                            applied_keys.append(k)
+                        else:
+                            unknown_keys.append(k)
+
+                    st.success(f"✅ Applied {len(applied_keys)} values from AI response")
+
+                    if unknown_keys:
+                        st.warning(
+                            f"⚠️ {len(unknown_keys)} keys from AI response were "
+                            f"not recognized and were skipped."
+                        )
+
+                    with st.expander("📋 Applied values", expanded=False):
+                        st.json({k: parsed[k] for k in applied_keys})
+
+                    if unknown_keys:
+                        with st.expander(f"❌ Unknown keys ({len(unknown_keys)})", expanded=False):
+                            st.write(unknown_keys)
+
+                except ValueError as e:
                     st.error(f"❌ Failed to parse AI response: {e}")
+                    st.info(
+                        "💡 **Tip:** Make sure Gemini returned a JSON block like:\n"
+                        "```json\n"
+                        '{\n  "OLT_SITE": "CDO_013_GPONA_02",\n  "OLT_OM_VLAN": "734"\n}\n'
+                        "```\n"
+                        "If it returned plain text or a different format, "
+                        "ask Gemini to re-run using the prompt from Step 1."
+                    )
+                    with st.expander("🔍 Debug — view pasted text", expanded=False):
+                        st.code(ai_response[:2000], language="text")
+                except Exception as e:
+                    st.error(f"❌ Unexpected error: {e}")
                     st.exception(e)
 
     with col_b:
@@ -304,14 +353,20 @@ with tab_ai:
                 try:
                     parsed = parse_ai_response(ai_response)
                     st.json(parsed)
-                except Exception as e:
+                    st.caption(f"✅ {len(parsed)} keys parsed successfully")
+                except ValueError as e:
                     st.error(f"❌ Failed to parse: {e}")
+                    with st.expander("🔍 View raw pasted text", expanded=True):
+                        st.code(ai_response[:2000], language="text")
+                except Exception as e:
+                    st.error(f"❌ Unexpected error: {e}")
 
     st.markdown("---")
     st.markdown("### 📋 Full List of Expected Data")
     st.caption("Ensure Gemini returns ALL these fields:")
     expected_keys = [p["key"] for p in PLACEHOLDER_MAP if p["source"] in ("FIO", "EWP")]
     st.code(json.dumps({k: "..." for k in expected_keys}, indent=2), language="json")
+
 
 # ============================================================
 # TAB 4: DOCUMENT METADATA
@@ -332,6 +387,7 @@ with tab_doc:
                     val = st.text_input(label, value=get_value(key, default), key=f"doc_{key}")
                     if val != get_value(key, default):
                         set_value(key, val)
+
 
 # ============================================================
 # TAB 5: PREVIEW
@@ -366,6 +422,7 @@ with tab_preview:
     col1.metric("Total", total)
     col2.metric("Filled", filled)
     col3.metric("Empty", total - filled)
+
 
 # ============================================================
 # TAB 6: GENERATE
@@ -416,8 +473,10 @@ with tab_generate:
                 finally:
                     for path in [step1_path, step2_path]:
                         if path and os.path.exists(path):
-                            try: os.unlink(path)
-                            except Exception: pass
+                            try:
+                                os.unlink(path)
+                            except Exception:
+                                pass
 
         if st.session_state.get("generated_file"):
             gen = st.session_state.generated_file
@@ -429,6 +488,7 @@ with tab_generate:
                 use_container_width=True,
                 key="download_btn",
             )
+
 
 # ============================================================
 # TAB 7: OCR DEBUG
@@ -446,13 +506,25 @@ with tab_ocr:
             st.image(st.session_state.ewp_image_bytes, use_container_width=True)
         with col2:
             st.markdown("### 📝 Raw OCR Text")
-            st.text_area("text", value=st.session_state.get("ewp_ocr_text", ""), height=500, label_visibility="collapsed")
+            st.text_area(
+                "text",
+                value=st.session_state.get("ewp_ocr_text", ""),
+                height=500,
+                label_visibility="collapsed",
+            )
 
         st.markdown("### 🎯 Candidate Matches (for dropdowns)")
         candidates = st.session_state.get("ewp_candidates", {})
         if candidates:
-            rows = [{"Placeholder": f"{{{{{k}}}}}", "Candidates": ", ".join(v) if v else "—"} for k, v in candidates.items()]
+            rows = [
+                {
+                    "Placeholder": f"{{{{{k}}}}}",
+                    "Candidates": ", ".join(v) if v else "—",
+                }
+                for k, v in candidates.items()
+            ]
             st.dataframe(rows, use_container_width=True, hide_index=True)
+
 
 # ============================================================
 # FOOTER
