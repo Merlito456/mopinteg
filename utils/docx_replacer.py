@@ -11,6 +11,7 @@ Handles:
 from docx import Document
 from docx.oxml.ns import qn
 import re
+import zipfile
 
 
 # ============================================================
@@ -236,14 +237,11 @@ def scan_docx_for_placeholders(docx_path):
     Useful for debugging broken placeholders.
 
     Returns:
-        dict with keys: valid, broken, unknown, all_keys
+        dict with keys: valid, broken, all_placeholder_strings
     """
-    import zipfile
-
     result = {
         "valid": [],
         "broken": [],
-        "unknown": [],
         "all_placeholder_strings": set(),
     }
 
