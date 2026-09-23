@@ -64,34 +64,31 @@ TEMPLATE_PATH = "template/MOP_INTEGRATION_TEMPLATE.docx"
 
 
 # ============================================================
-# SESSION STATE
+# SESSION STATE — Initialize all keys
 # ============================================================
-if "placeholder_values" not in st.session_state:
-    st.session_state.placeholder_values = {}
-if "fio_uploaded" not in st.session_state:
-    st.session_state.fio_uploaded = False
-if "ewp_uploaded" not in st.session_state:
-    st.session_state.ewp_uploaded = False
-if "ewp_image_bytes" not in st.session_state:
-    st.session_state.ewp_image_bytes = None
-if "ewp_ocr_text" not in st.session_state:
-    st.session_state.ewp_ocr_text = ""
-if "ewp_candidates" not in st.session_state:
-    st.session_state.ewp_candidates = {}
-if "fio_attachment_bytes" not in st.session_state:
-    st.session_state.fio_attachment_bytes = None
-if "fio_attachment_name" not in st.session_state:
-    st.session_state.fio_attachment_name = None
-if "generated_file" not in st.session_state:
-    st.session_state.generated_file = None
-if "ai_updated_keys" not in st.session_state:
-    st.session_state.ai_updated_keys = set()
-if "debug_log" not in st.session_state:
-    st.session_state.debug_log = []
-if "ole_debug_log" not in st.session_state:
-    st.session_state.ole_debug_log = []
-if "fio_parse_debug" not in st.session_state:
-    st.session_state.fio_parse_debug = None
+SESSION_DEFAULTS = {
+    "placeholder_values": {},
+    "fio_uploaded": False,
+    "ewp_uploaded": False,
+    "ewp_image_bytes": None,
+    "ewp_ocr_text": "",
+    "ewp_candidates": {},
+    "fio_attachment_bytes": None,
+    "fio_attachment_name": None,
+    "generated_file": None,
+    "ai_updated_keys": set(),
+    "debug_log": [],
+    "ole_debug_log": [],
+    "fio_parse_debug": None,
+}
+
+for key, default in SESSION_DEFAULTS.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+
+# Keys that must NEVER be deleted by cache clearing
+PROTECTED_SESSION_KEYS = set(SESSION_DEFAULTS.keys())
 
 
 # ============================================================
@@ -112,9 +109,42 @@ def reset_app():
 
 
 def clear_widget_caches():
-    """Clear all widget caches so fields re-read from placeholder_values."""
+    """
+    Clear widget-specific cache keys so fields re-read from placeholder_values.
+
+    Only clears keys like:
+      fio_<PLACEHOLDER_KEY>
+      ewp_<PLACEHOLDER_KEY>
+      doc_<PLACEHOLDER_KEY>
+      ewp_dd_<PLACEHOLDER_KEY>
+      ewp_ti_<PLACEHOLDER_KEY>
+      _last_<WIDGET_KEY>
+
+    Preserves all PROTECTED_SESSION_KEYS.
+    """
     for k in list(st.session_state.keys()):
-        if k.startswith(("fio_", "ewp_", "doc_", "_last_")):
+        # Never delete protected keys
+        if k in PROTECTED_SESSION_KEYS:
+            continue
+
+        # Only delete widget cache keys (matching specific patterns)
+        is_widget_cache = False
+
+        # Pattern: {prefix}_{UPPERCASE_KEY}
+        for prefix in ("fio_", "ewp_", "doc_", "ewp_dd_", "ewp_ti_"):
+            if k.startswith(prefix):
+                suffix = k[len(prefix):]
+                # Check if suffix looks like a placeholder key
+                # Placeholder keys are uppercase with underscores/digits
+                if re.match(r"^[A-Z][A-Z0-9_]*$", suffix):
+                    is_widget_cache = True
+                    break
+
+        # Pattern: _last_{anything}
+        if k.startswith("_last_"):
+            is_widget_cache = True
+
+        if is_widget_cache:
             del st.session_state[k]
 
 
@@ -299,7 +329,7 @@ with st.sidebar:
 
 
 # ============================================================
-# PARSE FIO
+# PARSE FIO — NO st.rerun() here
 # ============================================================
 if fio_file and not st.session_state.fio_uploaded:
     with st.spinner("Parsing FIO..."):
@@ -307,7 +337,6 @@ if fio_file and not st.session_state.fio_uploaded:
             fio_file.seek(0)
             parsed = parse_fio(fio_file)
 
-            # ⭐ Build debug info
             expected_keys = [
                 "OLT_SITE", "OLT_MGMT_IP", "OLT_OM_VLAN", "OLT_OM_GW",
                 "VLAN_SIP", "VLAN_HSI", "VLAN_IPOE1", "VLAN_IPOE2",
@@ -342,13 +371,14 @@ if fio_file and not st.session_state.fio_uploaded:
                     name = os.path.splitext(st.session_state.fio_attachment_name)[0]
                     set_value("FIO_REF", name)
 
+            # Set flag BEFORE clearing caches
             st.session_state.fio_uploaded = True
 
-            # ⭐ Clear widget caches and force UI refresh
+            # Clear widget caches (safe version preserves flags)
             clear_widget_caches()
 
             st.success(f"✅ FIO parsed — {len(parsed)} values mapped")
-            st.rerun()
+            # ⬇️ NO st.rerun() — Streamlit auto-reruns after widget interaction
 
         except Exception as e:
             st.error(f"❌ Failed to parse FIO: {e}")
@@ -356,7 +386,7 @@ if fio_file and not st.session_state.fio_uploaded:
 
 
 # ============================================================
-# STORE EWP IMAGE + AUTO-PARSE VIA OCR
+# STORE EWP IMAGE + AUTO-PARSE VIA OCR — NO st.rerun()
 # ============================================================
 if ewp_image and not st.session_state.ewp_uploaded:
     try:
@@ -386,7 +416,8 @@ if ewp_image and not st.session_state.ewp_uploaded:
                         f"✅ EWP loaded — {len(ewp_parsed)} values extracted, "
                         f"{applied} applied, {len(candidates)} candidate sets for dropdowns"
                     )
-                    st.rerun()
+                    # ⬇️ NO st.rerun()
+
                 except Exception as ocr_err:
                     st.warning(f"⚠️ OCR failed: {ocr_err}. Use dropdowns or AI paste.")
         else:
@@ -417,7 +448,7 @@ with tab_fio:
     st.subheader("FIO-Mapped Placeholders")
     st.caption("Auto-extracted from FIO. AI Paste and manual edits are reflected here.")
 
-    # ⭐ Show parse debug info
+    # Show parse debug info
     if st.session_state.get("fio_parse_debug"):
         dbg = st.session_state.fio_parse_debug
         with st.expander(
@@ -791,7 +822,6 @@ with tab_generate:
                 diag = check_placeholder_in_docx(TEMPLATE_PATH, "{{FIO_REF}}")
                 st.json(diag)
 
-            # Scan for ALL placeholders including broken ones
             if st.button("🔍 Scan Template Placeholders", key="scan_btn"):
                 scan = scan_docx_for_placeholders(TEMPLATE_PATH)
 
@@ -837,7 +867,7 @@ with tab_generate:
                 step2_path = None
                 step3_path = None
                 try:
-                    # --- Step 1: Replace text placeholders (EXCEPT FIO_REF) ---
+                    # --- Step 1: Replace text placeholders ---
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp1:
                         step1_path = tmp1.name
 
@@ -867,7 +897,6 @@ with tab_generate:
                         f"✅ Step 1: Replaced {len(mapping)} placeholders → {step1_path}"
                     )
 
-                    # Scan step1 output for remaining placeholders
                     scan_result = scan_docx_for_placeholders(step1_path)
                     st.session_state.debug_log.append("--- Scan of Step 1 output ---")
 
@@ -900,7 +929,7 @@ with tab_generate:
                         f"✅ Step 2: Inserted EWP image → {step2_path}"
                     )
 
-                    # --- Step 3: Embed FIO at {{FIO_REF}} ---
+                    # --- Step 3: Embed FIO ---
                     final_path = step2_path
                     has_attachment = bool(st.session_state.get("fio_attachment_bytes"))
 
@@ -1041,7 +1070,6 @@ with tab_generate:
                             st.markdown(f"- OLE relationship: {'✅' if has_ole_rel else '❌'}")
                             st.markdown(f"- Package relationship: {'✅' if has_pkg_rel else '❌'}")
 
-                            # Remaining placeholders
                             wt_runs = re.findall(
                                 r"<w:t(?:\s[^>]*)?>(.*?)</w:t>", doc_xml, re.DOTALL
                             )
