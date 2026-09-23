@@ -85,10 +85,9 @@ for key, default in SESSION_DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
-# Ensure SITE_NAME has a value even if placeholder_values existed already
+# Ensure SITE_NAME default
 if not st.session_state.placeholder_values.get("SITE_NAME"):
     st.session_state.placeholder_values["SITE_NAME"] = "LCGCDO"
-
 
 PROTECTED_SESSION_KEYS = set(SESSION_DEFAULTS.keys())
 
@@ -199,6 +198,55 @@ def check_placeholder_in_docx(docx_path, placeholder):
     return result
 
 
+def sync_all_widgets_to_placeholders():
+    """
+    Sync widget state (doc_*, fio_*, ewp_*) into placeholder_values.
+    Ensures all currently-rendered widgets contribute their values.
+    """
+    for p in PLACEHOLDER_MAP:
+        key = p["key"]
+
+        # Skip if already set in placeholder_values
+        if st.session_state.placeholder_values.get(key):
+            continue
+
+        # Try widget state — check prefixed keys
+        for prefix in ("doc_", "fio_", "ewp_"):
+            widget_key = f"{prefix}{key}"
+            if widget_key in st.session_state:
+                widget_val = st.session_state[widget_key]
+                if widget_val:
+                    st.session_state.placeholder_values[key] = widget_val
+                    break
+
+
+def get_value_with_fallback(key, default=""):
+    """
+    Read from placeholder_values, then widget state, then PLACEHOLDER_MAP default.
+    """
+    # 1. Try placeholder_values
+    val = st.session_state.placeholder_values.get(key, "")
+    if val:
+        return val
+
+    # 2. Try widget state
+    for prefix in ("doc_", "fio_", "ewp_"):
+        widget_val = st.session_state.get(f"{prefix}{key}", "")
+        if widget_val:
+            return widget_val
+
+    # 3. Try PLACEHOLDER_MAP default
+    for p in PLACEHOLDER_MAP:
+        if p["key"] == key:
+            default_val = p.get("default", "")
+            if default_val:
+                return default_val
+            break
+
+    # 4. Return provided default
+    return default
+
+
 def build_output_filename():
     """
     Build the output filename:
@@ -207,11 +255,14 @@ def build_output_filename():
     Example:
       MOP_LCGCDO_CDO_013_GPONA_02_MF-2_Mini_OLT_Integration_July 31_v1.1.docx
     """
-    site_name = get_value("SITE_NAME") or "SITE_NAME"
-    olt_site = get_value("OLT_SITE") or "OLT_SITE"
-    olt_product = get_value("OLT_PRODUCT") or "MF-2"
-    date_primary = get_value("DATE_PRIMARY") or "TBD"
-    version = get_value("VERSION") or "1.0"
+    # Sync widget state first to catch any user edits
+    sync_all_widgets_to_placeholders()
+
+    site_name = get_value_with_fallback("SITE_NAME", "LCGCDO")
+    olt_site = get_value_with_fallback("OLT_SITE", "OLT_SITE")
+    olt_product = get_value_with_fallback("OLT_PRODUCT", "MF-2")
+    date_primary = get_value_with_fallback("DATE_PRIMARY", "TBD")
+    version = get_value_with_fallback("VERSION", "1.0")
 
     def sanitize(s):
         s = str(s)
@@ -220,7 +271,7 @@ def build_output_filename():
         s = re.sub(r"\s+", " ", s)
         return s.strip()
 
-    # Strip ", YYYY" from date for a shorter filename
+    # Strip ", YYYY" from the date for a shorter filename
     date_short = re.sub(r",\s*\d{4}$", "", date_primary)
 
     parts = [
@@ -513,7 +564,8 @@ with tab_fio:
 
                     with cols[i % 2]:
                         val = st.text_input(display_label, key=widget_key, help=help_text)
-                        if val != current:
+                        # ⭐ Always sync non-empty values
+                        if val:
                             set_value(key, val)
                             st.session_state[f"_last_{widget_key}"] = val
 
@@ -577,7 +629,8 @@ with tab_ewp:
                         )
                         new_val = val
 
-                    if new_val != current:
+                    # ⭐ Always sync non-empty values
+                    if new_val:
                         set_value(key, new_val)
                         st.session_state[f"_last_{widget_key}"] = new_val
 
@@ -744,9 +797,10 @@ with tab_doc:
 
                 with cols[i % 2]:
                     val = st.text_input(display_label, key=widget_key)
-                    if val != current:
+                    # ⭐ Always sync non-empty values back to placeholder_values
+                    if val:
                         set_value(key, val)
-                        st.session_state[f"_last_{widget_key}"] = val
+                    st.session_state[f"_last_{widget_key}"] = val
 
 
 # ============================================================
@@ -755,7 +809,7 @@ with tab_doc:
 with tab_preview:
     st.subheader("Preview — All Placeholder Values")
 
-    # ⭐ Output filename preview
+    # Output filename preview
     st.markdown("### 📄 Output Filename Preview")
     st.code(build_output_filename(), language="text")
 
@@ -779,7 +833,7 @@ with tab_preview:
     rows = []
     for p in PLACEHOLDER_MAP:
         key = p["key"]
-        val = get_value(key, p.get("default", ""))
+        val = get_value_with_fallback(key, p.get("default", ""))
         marker = "🆕" if key in st.session_state.ai_updated_keys else ""
         if key == "FIO_REF":
             marker = "📎"
@@ -793,7 +847,7 @@ with tab_preview:
     st.dataframe(rows, use_container_width=True, hide_index=True)
 
     total = len(PLACEHOLDER_MAP)
-    filled = sum(1 for p in PLACEHOLDER_MAP if get_value(p["key"], p.get("default", "")))
+    filled = sum(1 for p in PLACEHOLDER_MAP if get_value_with_fallback(p["key"], p.get("default", "")))
     col1, col2, col3 = st.columns(3)
     col1.metric("Total", total)
     col2.metric("Filled", filled)
@@ -897,13 +951,13 @@ with tab_generate:
                         key = p["key"]
                         if key == "FIO_REF":
                             continue
-                        val = get_value(key, p.get("default", ""))
+                        val = get_value_with_fallback(key, p.get("default", ""))
                         if val:
                             mapping[key] = val
 
-                    # Ensure SITE_NAME is in the mapping
+                    # Ensure SITE_NAME is in mapping
                     if "SITE_NAME" not in mapping:
-                        mapping["SITE_NAME"] = get_value("SITE_NAME") or "LCGCDO"
+                        mapping["SITE_NAME"] = get_value_with_fallback("SITE_NAME", "LCGCDO")
 
                     st.session_state.debug_log.append(
                         f"Mapping keys: **{len(mapping)}**"
@@ -1148,7 +1202,6 @@ with tab_about:
 
     st.markdown("---")
 
-    # ---- Developer ----
     st.header("👨‍💻 Developer")
     st.markdown(
         """
@@ -1160,7 +1213,6 @@ with tab_about:
 
     st.markdown("---")
 
-    # ---- Mission & Vision ----
     mission_col, vision_col = st.columns(2)
 
     with mission_col:
@@ -1188,7 +1240,6 @@ with tab_about:
 
     st.markdown("---")
 
-    # ---- Features ----
     st.header("🚀 Features")
     st.markdown(
         """
@@ -1203,7 +1254,6 @@ with tab_about:
 
     st.markdown("---")
 
-    # ---- Advantages ----
     st.header("⚡ Advantages Over Manual MOP Creation")
     st.markdown(
         """
@@ -1226,7 +1276,6 @@ with tab_about:
 
     st.markdown("---")
 
-    # ---- How It Works ----
     st.header("🔄 How It Works")
     st.code(
         """
@@ -1249,7 +1298,6 @@ with tab_about:
 
     st.markdown("---")
 
-    # ---- Tech Stack ----
     st.header("🛠️ Built With")
 
     tech_col1, tech_col2, tech_col3 = st.columns(3)
@@ -1268,7 +1316,6 @@ with tab_about:
 
     st.markdown("---")
 
-    # ---- Disclaimer ----
     with st.expander("⚠️ Disclaimer", expanded=False):
         st.markdown(
             """
@@ -1285,7 +1332,6 @@ with tab_about:
 
     st.markdown("---")
 
-    # ---- Contact ----
     st.markdown(
         """
         <div style="text-align: center; padding: 20px;">
