@@ -1,8 +1,9 @@
 """
 Embed an Excel file (.xlsx) as an OLE object into a DOCX.
 
-Uses low-level OOXML manipulation to create an authentic embedded Excel icon
-that users can double-click to open in Excel.
+Two approaches:
+1. embed_excel_as_package() — Word 2016+ native (recommended, mimics drag-and-drop)
+2. embed_excel_in_docx()     — Legacy OLE (fallback for older Word)
 
 Reference:
 - OOXML spec: https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oe376/
@@ -24,8 +25,12 @@ from io import BytesIO
 # Constants
 # ============================================================
 OLE_PROG_ID = "Excel.Sheet.12"          # Excel 2007+ (.xlsx)
+PACKAGE_PROG_ID = "Package"             # Modern package embed
 OLE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.oleObject"
+XLSX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
 OLE_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject"
+PACKAGE_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/package"
 ICON_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
 
 
@@ -65,10 +70,7 @@ def _log(msg: str):
 # Namespace fix — CRITICAL for OLE to render
 # ============================================================
 def _ensure_required_namespaces(doc_xml: str) -> str:
-    """
-    Ensure document.xml has all namespaces required for OLE embedding.
-    Word needs: xmlns:o, xmlns:v, xmlns:w10, xmlns:r, xmlns:w
-    """
+    """Ensure document.xml has all namespaces required for OLE embedding."""
     doc_tag_match = re.search(r"<w:document\b[^>]*>", doc_xml)
     if not doc_tag_match:
         _log("  [NS] ⚠️ Could not find <w:document> tag")
@@ -93,34 +95,22 @@ def _ensure_required_namespaces(doc_xml: str) -> str:
 
 
 # ============================================================
-# Unique ID generation — CRITICAL to prevent collisions
+# Unique ID generation — prevents collisions
 # ============================================================
 def _find_existing_ole_ids(doc_xml: str) -> dict:
-    """
-    Find existing ShapeID, ObjectID, and shape id values in the document.
-    Used to avoid collisions when generating new IDs.
-    """
-    used_shape_ids = set(re.findall(r'ShapeID="([^"]+)"', doc_xml))
-    used_object_ids = set(re.findall(r'ObjectID="([^"]+)"', doc_xml))
-    used_shape_attrs = set(re.findall(r'<v:shape[^>]*\sid="([^"]+)"', doc_xml))
-    used_anchors = set(re.findall(r'w14:anchorId="([^"]+)"', doc_xml))
-
+    """Find existing ShapeID, ObjectID, and anchor values in the document."""
     return {
-        "shape_ids": used_shape_ids,
-        "object_ids": used_object_ids,
-        "shape_attrs": used_shape_attrs,
-        "anchors": used_anchors,
+        "shape_ids": set(re.findall(r'ShapeID="([^"]+)"', doc_xml)),
+        "object_ids": set(re.findall(r'ObjectID="([^"]+)"', doc_xml)),
+        "shape_attrs": set(re.findall(r'<v:shape[^>]*\sid="([^"]+)"', doc_xml)),
+        "anchors": set(re.findall(r'w14:anchorId="([^"]+)"', doc_xml)),
     }
 
 
 def _generate_unique_ole_ids(doc_xml: str) -> dict:
-    """
-    Generate unique ShapeID, ObjectID, and anchorId that don't collide
-    with any existing values in the document.
-    """
+    """Generate unique ShapeID, ObjectID, and anchorId."""
     existing = _find_existing_ole_ids(doc_xml)
 
-    # ---- Shape ID (format: _x0000_iXXXX) ----
     shape_id = None
     for _ in range(200):
         candidate = f"_x0000_i{random.randint(1028, 99999)}"
@@ -131,7 +121,6 @@ def _generate_unique_ole_ids(doc_xml: str) -> dict:
     if shape_id is None:
         shape_id = f"_x0000_i{int(time.time() * 1000) % 100000}"
 
-    # ---- Object ID (format: _NNNNNNNNNN) ----
     object_id = None
     for _ in range(200):
         candidate = f"_{random.randint(1000000000, 9999999999)}"
@@ -141,7 +130,6 @@ def _generate_unique_ole_ids(doc_xml: str) -> dict:
     if object_id is None:
         object_id = f"_{int(time.time() * 1000000)}"
 
-    # ---- Anchor ID (8-char hex) ----
     anchor_id = None
     for _ in range(200):
         candidate = ''.join(random.choices('0123456789ABCDEF', k=8))
@@ -164,7 +152,221 @@ def _generate_unique_ole_ids(doc_xml: str) -> dict:
 
 
 # ============================================================
-# Main Entry Point
+# PACKAGE Approach — Modern Word (RECOMMENDED)
+# ============================================================
+def embed_excel_as_package(
+    docx_path: str,
+    xlsx_bytes: bytes,
+    xlsx_filename: str,
+    placeholder: str = "{{FIO_REF}}",
+    output_path: str = None,
+) -> str:
+    """
+    Embed an .xlsx file using Word's PACKAGE format (most reliable for Word 2016+).
+
+    This mimics Word's modern drag-and-drop behavior:
+    - Stores the .xlsx as an embedded package (oleObject1.xlsx, not .bin)
+    - Uses ProgID="Package" with Content-Type Override
+    - Word renders it as a clickable icon that opens Excel on double-click
+    """
+    docx_path = Path(docx_path)
+    if output_path is None:
+        output_path = docx_path.parent / f"{docx_path.stem}_with_package.docx"
+    else:
+        output_path = Path(output_path)
+
+    _log("=" * 60)
+    _log("EMBED EXCEL AS PACKAGE — START")
+    _log(f"  Source:      {docx_path}")
+    _log(f"  Output:      {output_path}")
+    _log(f"  Placeholder: {placeholder!r}")
+    _log(f"  XLSX bytes:  {len(xlsx_bytes):,}")
+    _log(f"  XLSX name:   {xlsx_filename}")
+
+    # 1. Extract DOCX
+    temp_dir = docx_path.parent / f"_temp_pkg_{docx_path.stem}"
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with zipfile.ZipFile(docx_path, "r") as z:
+            z.extractall(temp_dir)
+        _log(f"  [1] Extracted DOCX → {temp_dir}")
+    except Exception as e:
+        raise ValueError(f"Failed to extract DOCX: {e}")
+
+    # 2. Load document.xml
+    doc_xml_path = temp_dir / "word" / "document.xml"
+    try:
+        doc_xml = doc_xml_path.read_text(encoding="utf-8")
+    except Exception as e:
+        raise ValueError(f"Failed to read document.xml: {e}")
+
+    _log(f"  [2] document.xml size: {len(doc_xml):,} chars")
+    _log(f"  [2] Placeholder found in XML: {placeholder in doc_xml}")
+
+    if placeholder not in doc_xml:
+        # Case-insensitive fallback
+        if placeholder.upper() in doc_xml.upper():
+            _log("  [2] ⚠️ Found case-insensitive match")
+            idx = doc_xml.upper().find(placeholder.upper())
+            actual = doc_xml[idx:idx + len(placeholder)]
+            _log(f"  [2] ⚠️ Actual text: {actual!r}")
+            placeholder = actual
+        else:
+            raise ValueError(
+                f"Placeholder '{placeholder}' not found in document.xml."
+            )
+
+    # 3. Create embeddings folder
+    embeddings_dir = temp_dir / "word" / "embeddings"
+    embeddings_dir.mkdir(parents=True, exist_ok=True)
+
+    # Find next available index (checking both .bin and .xlsx)
+    existing_bin = list(embeddings_dir.glob("oleObject*.bin"))
+    existing_xlsx = list(embeddings_dir.glob("oleObject*.xlsx"))
+    ole_index = len(existing_bin) + len(existing_xlsx) + 1
+
+    package_filename = f"oleObject{ole_index}.xlsx"
+    package_path = embeddings_dir / package_filename
+
+    # 4. Write the xlsx directly (as .xlsx, not .bin)
+    with open(package_path, "wb") as f:
+        f.write(xlsx_bytes)
+    _log(f"  [4] Wrote package: {package_filename} ({len(xlsx_bytes):,} bytes)")
+
+    # 5. Create Excel icon
+    icon_path, icon_filename = _ensure_excel_icon(temp_dir, ole_index)
+    _log(f"  [5] Icon ready: {icon_filename}")
+
+    # 6. Add relationships
+    rels_path = temp_dir / "word" / "_rels" / "document.xml.rels"
+    rels_xml = rels_path.read_text(encoding="utf-8")
+
+    rids = re.findall(r'Id="rId(\d+)"', rels_xml)
+    next_rid_pkg = max(int(r) for r in rids) + 1 if rids else 1
+    next_rid_icon = next_rid_pkg + 1
+
+    # ⚠️ PACKAGE relationship (different from oleObject!)
+    package_rel = (
+        f'<Relationship Id="rId{next_rid_pkg}" '
+        f'Type="{PACKAGE_REL_TYPE}" '
+        f'Target="embeddings/{package_filename}"/>'
+    )
+    icon_rel = (
+        f'<Relationship Id="rId{next_rid_icon}" '
+        f'Type="{ICON_REL_TYPE}" '
+        f'Target="media/{icon_filename}"/>'
+    )
+
+    rels_xml = rels_xml.replace(
+        "</Relationships>",
+        package_rel + icon_rel + "</Relationships>",
+    )
+    rels_path.write_text(rels_xml, encoding="utf-8")
+    _log(f"  [6] Added rels: rId{next_rid_pkg} (package), rId{next_rid_icon} (icon)")
+
+    # 7. Generate unique IDs
+    unique_ids = _generate_unique_ole_ids(doc_xml)
+
+    # 8. Build Package XML
+    package_xml = _build_package_xml(
+        package_rid=f"rId{next_rid_pkg}",
+        icon_rid=f"rId{next_rid_icon}",
+        display_name=xlsx_filename,
+        shape_id=unique_ids["shape_id"],
+        object_id=unique_ids["object_id"],
+        anchor_id=unique_ids["anchor_id"],
+    )
+    _log(f"  [8] Package XML length: {len(package_xml)} chars")
+
+    # 9. Replace placeholder
+    doc_xml, replaced = _replace_placeholder_with_ole(doc_xml, placeholder, package_xml)
+    _log(f"  [9] Replaced: {replaced}")
+
+    if not replaced:
+        raise ValueError(
+            f"Placeholder '{placeholder}' was found but could not be replaced."
+        )
+
+    # 9b. Ensure namespaces
+    doc_xml = _ensure_required_namespaces(doc_xml)
+    doc_xml_path.write_text(doc_xml, encoding="utf-8")
+
+    # 10. Update [Content_Types].xml — need Override for the .xlsx package
+    ct_path = temp_dir / "[Content_Types].xml"
+    ct_xml = ct_path.read_text(encoding="utf-8")
+
+    override_xml = (
+        f'<Override PartName="/word/embeddings/{package_filename}" '
+        f'ContentType="{XLSX_CONTENT_TYPE}"/>'
+    )
+
+    if f"/word/embeddings/{package_filename}" not in ct_xml:
+        ct_xml = ct_xml.replace("</Types>", override_xml + "</Types>")
+        _log(f"  [10] Added Override for {package_filename}")
+
+    if 'Extension="png"' not in ct_xml:
+        ct_xml = ct_xml.replace(
+            "</Types>",
+            '<Default Extension="png" ContentType="image/png"/></Types>',
+        )
+        _log("  [10] Added .png content type")
+
+    ct_path.write_text(ct_xml, encoding="utf-8")
+
+    # 11. Re-zip
+    with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as z:
+        for root, dirs, files in os.walk(temp_dir):
+            for file in files:
+                file_path = Path(root) / file
+                arcname = file_path.relative_to(temp_dir)
+                z.write(file_path, str(arcname).replace("\\", "/"))
+
+    _log(f"  [11] Re-zipped → {output_path}")
+    _log("EMBED PACKAGE — ✅ SUCCESS")
+    _log("=" * 60)
+
+    shutil.rmtree(temp_dir, ignore_errors=True)
+    return str(output_path)
+
+
+def _build_package_xml(
+    package_rid: str,
+    icon_rid: str,
+    display_name: str,
+    shape_id: str,
+    object_id: str,
+    anchor_id: str,
+) -> str:
+    """Build the Package (modern) embedding XML."""
+    safe_name = html.escape(display_name)
+
+    return (
+        '<w:r>'
+        '<w:rPr><w:noProof/></w:rPr>'
+        f'<w:object w:dxaOrig="1440" w:dyaOrig="1440" w14:anchorId="{anchor_id}">'
+        f'<v:shape id="{shape_id}" type="#_x0000_t75" '
+        'style="width:32pt;height:32pt" o:ole="">'
+        f'<v:imagedata r:id="{icon_rid}" o:title="{safe_name}"/>'
+        '</v:shape>'
+        # Package uses ProgID="Package" and NO FieldCodes
+        f'<o:OLEObject Type="Embed" ProgID="{PACKAGE_PROG_ID}" '
+        f'ShapeID="{shape_id}" DrawAspect="Icon" ObjectID="{object_id}" '
+        f'r:id="{package_rid}"/>'
+        '</w:object>'
+        '</w:r>'
+        # Filename text after icon
+        '<w:r>'
+        '<w:rPr><w:noProof/></w:rPr>'
+        f'<w:t xml:space="preserve"> {safe_name}</w:t>'
+        '</w:r>'
+    )
+
+
+# ============================================================
+# LEGACY OLE Approach — Fallback
 # ============================================================
 def embed_excel_in_docx(
     docx_path: str,
@@ -174,20 +376,8 @@ def embed_excel_in_docx(
     output_path: str = None,
 ) -> str:
     """
-    Replace a {{FIO_REF}} placeholder in a DOCX with a real OLE-embedded Excel file.
-
-    Args:
-        docx_path: Path to the input .docx
-        xlsx_bytes: Raw bytes of the .xlsx file to embed
-        xlsx_filename: Original filename (used for icon display name)
-        placeholder: The placeholder token to replace (default: {{FIO_REF}})
-        output_path: Where to save the output. If None, uses *_with_attachment.docx
-
-    Returns:
-        Path to the generated .docx
-
-    Raises:
-        ValueError: If placeholder not found OR replacement fails
+    Replace a {{FIO_REF}} placeholder with a legacy OLE-embedded Excel file.
+    Use this for older Word versions or as a fallback.
     """
     docx_path = Path(docx_path)
     if output_path is None:
@@ -196,7 +386,7 @@ def embed_excel_in_docx(
         output_path = Path(output_path)
 
     _log("=" * 60)
-    _log("EMBED EXCEL — START")
+    _log("EMBED EXCEL (LEGACY OLE) — START")
     _log(f"  Source:      {docx_path}")
     _log(f"  Output:      {output_path}")
     _log(f"  Placeholder: {placeholder!r}")
@@ -226,11 +416,6 @@ def embed_excel_in_docx(
     _log(f"  [2] document.xml size: {len(doc_xml):,} chars")
     _log(f"  [2] Placeholder found in XML: {placeholder in doc_xml}")
 
-    if placeholder in doc_xml:
-        idx = doc_xml.find(placeholder)
-        snippet = doc_xml[max(0, idx - 100):idx + 100]
-        _log(f"  [2] Context: ...{snippet}...")
-
     if placeholder not in doc_xml:
         if placeholder.upper() in doc_xml.upper():
             _log("  [2] ⚠️ Found case-insensitive match")
@@ -240,8 +425,7 @@ def embed_excel_in_docx(
             placeholder = actual
         else:
             raise ValueError(
-                f"Placeholder '{placeholder}' not found in document.xml. "
-                "Add it to the template where the FIO attachment should appear."
+                f"Placeholder '{placeholder}' not found in document.xml."
             )
 
     # 3. Prepare embeddings folder
@@ -288,7 +472,7 @@ def embed_excel_in_docx(
     rels_path.write_text(rels_xml, encoding="utf-8")
     _log(f"  [6] Added rels: rId{next_rid_ole} (OLE), rId{next_rid_icon} (icon)")
 
-    # 7. Generate UNIQUE IDs (avoid collision with existing OLE objects)
+    # 7. Generate unique IDs
     unique_ids = _generate_unique_ole_ids(doc_xml)
 
     ole_xml = _build_ole_xml(
@@ -307,12 +491,10 @@ def embed_excel_in_docx(
 
     if not replaced:
         raise ValueError(
-            f"Placeholder '{placeholder}' was found but could not be replaced. "
+            f"Placeholder '{placeholder}' was found but could not be replaced."
         )
 
-    # 8b. Ensure required namespaces are declared
     doc_xml = _ensure_required_namespaces(doc_xml)
-
     doc_xml_path.write_text(doc_xml, encoding="utf-8")
     _log(f"  [8] document.xml updated ({len(doc_xml):,} chars)")
 
@@ -336,7 +518,7 @@ def embed_excel_in_docx(
 
     ct_path.write_text(ct_xml, encoding="utf-8")
 
-    # 10. Re-zip as DOCX
+    # 10. Re-zip
     with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as z:
         for root, dirs, files in os.walk(temp_dir):
             for file in files:
@@ -345,11 +527,44 @@ def embed_excel_in_docx(
                 z.write(file_path, str(arcname).replace("\\", "/"))
 
     _log(f"  [10] Re-zipped → {output_path}")
-    _log("EMBED EXCEL — ✅ SUCCESS")
+    _log("EMBED OLE — ✅ SUCCESS")
     _log("=" * 60)
 
     shutil.rmtree(temp_dir, ignore_errors=True)
     return str(output_path)
+
+
+def _build_ole_xml(
+    ole_rid: str,
+    icon_rid: str,
+    display_name: str,
+    shape_id: str,
+    object_id: str,
+    anchor_id: str,
+) -> str:
+    """Build legacy OLE XML."""
+    safe_name = html.escape(display_name)
+
+    return (
+        '<w:r>'
+        '<w:rPr><w:noProof/></w:rPr>'
+        f'<w:object w:dxaOrig="1440" w:dyaOrig="1440" w14:anchorId="{anchor_id}">'
+        f'<v:shape id="{shape_id}" type="#_x0000_t75" '
+        'style="width:32pt;height:32pt" o:ole="">'
+        f'<v:imagedata r:id="{icon_rid}" o:title="{safe_name}"/>'
+        '</v:shape>'
+        f'<o:OLEObject Type="Embed" ProgID="{OLE_PROG_ID}" '
+        f'ShapeID="{shape_id}" DrawAspect="Icon" ObjectID="{object_id}" '
+        f'r:id="{ole_rid}">'
+        '<o:FieldCodes>\\s</o:FieldCodes>'
+        '</o:OLEObject>'
+        '</w:object>'
+        '</w:r>'
+        '<w:r>'
+        '<w:rPr><w:noProof/></w:rPr>'
+        f'<w:t xml:space="preserve"> {safe_name}</w:t>'
+        '</w:r>'
+    )
 
 
 # ============================================================
@@ -375,17 +590,26 @@ def _ensure_excel_icon(temp_dir: Path, ole_index: int) -> tuple:
 
 
 def _generate_excel_icon_bytes() -> bytes:
-    """Generate a 48x48 Excel-green icon PNG."""
+    """
+    Load a real Excel icon from assets/excel_icon.png, or generate one.
+    """
+    # Try to load a real icon file first
     icon_file = Path(__file__).parent.parent / "assets" / "excel_icon.png"
     if icon_file.exists():
-        with open(icon_file, "rb") as f:
-            return f.read()
+        try:
+            with open(icon_file, "rb") as f:
+                return f.read()
+        except Exception:
+            pass
 
+    # Generate a 48×48 icon
     try:
         from PIL import Image, ImageDraw
         img = Image.new("RGBA", (48, 48), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
+        # Excel green rounded square
         draw.rounded_rectangle([(2, 2), (46, 46)], radius=6, fill=(33, 115, 70, 255))
+        # White "X" for Excel
         draw.line([(14, 14), (34, 34)], fill="white", width=4)
         draw.line([(34, 14), (14, 34)], fill="white", width=4)
 
@@ -393,6 +617,7 @@ def _generate_excel_icon_bytes() -> bytes:
         img.save(buf, format="PNG")
         return buf.getvalue()
     except ImportError:
+        # Fallback: 1x1 transparent PNG
         return (
             b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
             b"\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
@@ -402,50 +627,7 @@ def _generate_excel_icon_bytes() -> bytes:
 
 
 # ============================================================
-# OLE Object XML Builder — Word-compatible + UNIQUE IDs
-# ============================================================
-def _build_ole_xml(
-    ole_rid: str,
-    icon_rid: str,
-    display_name: str,
-    shape_id: str,
-    object_id: str,
-    anchor_id: str,
-) -> str:
-    """
-    Build the OLE object XML matching Word's native embedded object structure.
-    Uses UNIQUE IDs to prevent collisions with existing OLE objects in the template.
-    """
-    safe_name = html.escape(display_name)
-
-    ole_xml = (
-        '<w:r>'
-        '<w:rPr><w:noProof/></w:rPr>'
-        f'<w:object w:dxaOrig="1440" w:dyaOrig="1440" w14:anchorId="{anchor_id}">'
-        # ---- Icon shape (ShapeID matches below) ----
-        f'<v:shape id="{shape_id}" type="#_x0000_t75" '
-        'style="width:32pt;height:32pt" o:ole="">'
-        f'<v:imagedata r:id="{icon_rid}" o:title="{safe_name}"/>'
-        '</v:shape>'
-        # ---- OLE object reference ----
-        f'<o:OLEObject Type="Embed" ProgID="{OLE_PROG_ID}" '
-        f'ShapeID="{shape_id}" DrawAspect="Icon" ObjectID="{object_id}" '
-        f'r:id="{ole_rid}">'
-        '<o:FieldCodes>\\s</o:FieldCodes>'
-        '</o:OLEObject>'
-        '</w:object>'
-        '</w:r>'
-        # ---- Filename text after the icon ----
-        '<w:r>'
-        '<w:rPr><w:noProof/></w:rPr>'
-        f'<w:t xml:space="preserve"> {safe_name}</w:t>'
-        '</w:r>'
-    )
-    return ole_xml
-
-
-# ============================================================
-# Placeholder Replacement — SIMPLE & ROBUST
+# Placeholder Replacement
 # ============================================================
 def _replace_placeholder_with_ole(doc_xml: str, placeholder: str, ole_xml: str) -> tuple:
     """
@@ -496,6 +678,7 @@ def diagnose_placeholder(docx_path: str, placeholder: str = "{{FIO_REF}}") -> di
         "run_count": 0,
         "has_ole_xml": False,
         "has_ole_bin": False,
+        "has_package": False,
         "has_ole_rel": False,
         "namespaces": {},
         "ole_ids": {},
@@ -530,13 +713,14 @@ def diagnose_placeholder(docx_path: str, placeholder: str = "{{FIO_REF}}") -> di
         for ns in ["xmlns:o", "xmlns:v", "xmlns:w10", "xmlns:r", "xmlns:w14"]:
             result["namespaces"][ns] = f'{ns}=' in doc_xml
 
-        embeddings = list((temp_dir / "word" / "embeddings").glob("*.bin"))
-        result["has_ole_bin"] = len(embeddings) > 0
+        embeddings = list((temp_dir / "word" / "embeddings").glob("*"))
+        result["has_ole_bin"] = any(e.suffix == ".bin" for e in embeddings)
+        result["has_package"] = any(e.suffix == ".xlsx" for e in embeddings)
 
         rels_path = temp_dir / "word" / "_rels" / "document.xml.rels"
         if rels_path.exists():
             rels_xml = rels_path.read_text(encoding="utf-8")
-            result["has_ole_rel"] = "oleObject" in rels_xml
+            result["has_ole_rel"] = ("oleObject" in rels_xml or "package" in rels_xml)
 
         # Check OLE ID uniqueness
         shape_ids = re.findall(r'ShapeID="([^"]+)"', doc_xml)
@@ -561,17 +745,30 @@ def diagnose_placeholder(docx_path: str, placeholder: str = "{{FIO_REF}}") -> di
 # ============================================================
 # Test Utility
 # ============================================================
-def test_embedding(docx_path: str, xlsx_path: str, output_path: str = None) -> str:
-    """Quick test function to verify embedding works."""
+def test_embedding(docx_path: str, xlsx_path: str, output_path: str = None,
+                   use_package: bool = True) -> str:
+    """
+    Quick test function.
+    Uses PACKAGE approach by default (recommended for Word 2016+).
+    """
     with open(xlsx_path, "rb") as f:
         xlsx_bytes = f.read()
 
     xlsx_filename = os.path.basename(xlsx_path)
 
-    return embed_excel_in_docx(
-        docx_path=docx_path,
-        xlsx_bytes=xlsx_bytes,
-        xlsx_filename=xlsx_filename,
-        placeholder="{{FIO_REF}}",
-        output_path=output_path,
-    )
+    if use_package:
+        return embed_excel_as_package(
+            docx_path=docx_path,
+            xlsx_bytes=xlsx_bytes,
+            xlsx_filename=xlsx_filename,
+            placeholder="{{FIO_REF}}",
+            output_path=output_path,
+        )
+    else:
+        return embed_excel_in_docx(
+            docx_path=docx_path,
+            xlsx_bytes=xlsx_bytes,
+            xlsx_filename=xlsx_filename,
+            placeholder="{{FIO_REF}}",
+            output_path=output_path,
+        )
