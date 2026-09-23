@@ -13,6 +13,16 @@ from utils.fio_parser import parse_fio
 from utils.docx_replacer import replace_placeholders
 from utils.image_replacer import replace_ewp_image
 
+# Optional EWP OCR parser — graceful fallback if Tesseract not available
+try:
+    from utils.ewp_parser import parse_ewp, get_ocr_text
+    EWP_OCR_AVAILABLE = True
+except Exception:
+    EWP_OCR_AVAILABLE = False
+    parse_ewp = None
+    get_ocr_text = None
+
+
 # ============================================================
 # CONFIG
 # ============================================================
@@ -40,6 +50,9 @@ if "ewp_uploaded" not in st.session_state:
 
 if "ewp_image_bytes" not in st.session_state:
     st.session_state.ewp_image_bytes = None
+
+if "ewp_ocr_text" not in st.session_state:
+    st.session_state.ewp_ocr_text = ""
 
 if "generated_file" not in st.session_state:
     st.session_state.generated_file = None
@@ -71,6 +84,9 @@ st.markdown(
     """
     Upload the **FIO Excel** and **EWP Image**, verify the mapped values, 
     then generate the filled **MOP Integration Template**.
+
+    - **FIO values** → auto-extracted from the Excel file
+    - **EWP values** → auto-extracted via OCR, editable for verification
     """
 )
 
@@ -96,8 +112,8 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### Step 2 — Review & Edit")
     st.markdown(
-        "FIO-derived values are **auto-filled** and editable.\n\n"
-        "EWP-only values require **manual input**."
+        "FIO-derived values are **auto-filled**.\n\n"
+        "EWP-only values are **auto-extracted via OCR** — please verify and edit."
     )
 
     st.markdown("---")
@@ -119,7 +135,8 @@ with st.sidebar:
     st.markdown(
         f"- FIO: {'✅ Loaded' if st.session_state.fio_uploaded else '❌ Not uploaded'}\n"
         f"- EWP Image: {'✅ Loaded' if st.session_state.ewp_uploaded else '❌ Not uploaded'}\n"
-        f"- Template: {'✅ Found' if os.path.exists(TEMPLATE_PATH) else '❌ Missing'}"
+        f"- Template: {'✅ Found' if os.path.exists(TEMPLATE_PATH) else '❌ Missing'}\n"
+        f"- OCR Engine: {'✅ Available' if EWP_OCR_AVAILABLE else '⚠️ Unavailable'}"
     )
 
 
@@ -140,13 +157,45 @@ if fio_file and not st.session_state.fio_uploaded:
 
 
 # ============================================================
-# STORE EWP IMAGE
+# STORE EWP IMAGE + AUTO-PARSE VIA OCR
 # ============================================================
 if ewp_image and not st.session_state.ewp_uploaded:
     try:
-        st.session_state.ewp_image_bytes = ewp_image.read()
+        ewp_bytes = ewp_image.read()
+        st.session_state.ewp_image_bytes = ewp_bytes
         st.session_state.ewp_uploaded = True
-        st.success("✅ EWP image loaded")
+
+        # --- Auto-parse EWP via OCR ---
+        if EWP_OCR_AVAILABLE:
+            with st.spinner("🔍 Extracting values from EWP image (OCR)..."):
+                try:
+                    ewp_parsed = parse_ewp(ewp_bytes)
+                    ocr_raw = get_ocr_text(ewp_bytes)
+                    st.session_state.ewp_ocr_text = ocr_raw
+
+                    # Only overwrite if empty (FIO takes precedence)
+                    applied = 0
+                    for k, v in ewp_parsed.items():
+                        if not get_value(k):
+                            set_value(k, v)
+                            applied += 1
+
+                    st.success(
+                        f"✅ EWP image loaded — {len(ewp_parsed)} values extracted "
+                        f"({applied} applied)"
+                    )
+
+                except Exception as ocr_err:
+                    st.warning(
+                        f"⚠️ OCR extraction failed: {ocr_err}. "
+                        "You can still enter EWP values manually."
+                    )
+        else:
+            st.info(
+                "ℹ️ EWP image loaded. OCR engine unavailable — "
+                "please enter EWP values manually."
+            )
+
     except Exception as e:
         st.error(f"❌ Failed to load EWP image: {e}")
         st.exception(e)
@@ -155,12 +204,13 @@ if ewp_image and not st.session_state.ewp_uploaded:
 # ============================================================
 # TABS
 # ============================================================
-tab_fio, tab_ewp, tab_doc, tab_preview, tab_generate = st.tabs([
+tab_fio, tab_ewp, tab_doc, tab_preview, tab_generate, tab_ocr = st.tabs([
     "📊 FIO-Mapped (Auto)",
-    "🖼️ EWP-Only (Manual)",
+    "🖼️ EWP-Only (OCR + Manual)",
     "📝 Document Metadata",
     "👁️ Preview",
     "📄 Generate",
+    "🔍 OCR Debug",
 ])
 
 
@@ -193,17 +243,21 @@ with tab_fio:
 
 
 # ============================================================
-# TAB 2: EWP-ONLY
+# TAB 2: EWP-ONLY (OCR + MANUAL)
 # ============================================================
 with tab_ewp:
-    st.subheader("EWP-Only Placeholders (Manual Input)")
+    st.subheader("EWP-Only Placeholders (OCR + Manual)")
     st.caption(
-        "These values cannot be extracted from the FIO — they must be read from "
-        "the EWP image and entered manually."
+        "These values are **auto-extracted via OCR** from the EWP image. "
+        "Please verify and edit as needed."
     )
 
     if not st.session_state.ewp_uploaded:
         st.warning("⚠️ Upload the EWP image first (it will be inserted into the MOP).")
+    elif not EWP_OCR_AVAILABLE:
+        st.info("ℹ️ OCR engine unavailable — please enter EWP values manually.")
+    else:
+        st.info("💡 Tip: Check the **OCR Debug** tab to verify extraction accuracy.")
 
     groups = sorted(set(p["group"] for p in PLACEHOLDER_MAP if p["source"] == "EWP"))
     for group in groups:
@@ -214,12 +268,14 @@ with tab_ewp:
                 key = item["key"]
                 label = item["label"]
                 with cols[i % 2]:
+                    current_val = get_value(key)
                     val = st.text_input(
                         label,
-                        value=get_value(key),
+                        value=current_val,
                         key=f"ewp_{key}",
+                        help="✅ Auto-filled" if current_val else "⚠️ Empty — please input",
                     )
-                    if val != get_value(key):
+                    if val != current_val:
                         set_value(key, val)
 
 
@@ -378,6 +434,72 @@ with tab_generate:
                 use_container_width=True,
                 key="download_btn",
             )
+
+
+# ============================================================
+# TAB 6: OCR DEBUG
+# ============================================================
+with tab_ocr:
+    st.subheader("🔍 OCR Extraction Debug")
+    st.caption(
+        "This tab shows what the OCR engine extracted from the EWP image. "
+        "Use it to verify accuracy and diagnose extraction issues."
+    )
+
+    if not EWP_OCR_AVAILABLE:
+        st.warning(
+            "⚠️ OCR engine (Tesseract) is not installed. "
+            "Add `tesseract-ocr` to `packages.txt` and redeploy."
+        )
+    elif not st.session_state.get("ewp_uploaded"):
+        st.info("ℹ️ Upload the EWP image first.")
+    else:
+        col1, col2 = st.columns([1, 1])
+
+        with col1:
+            st.markdown("### 🖼️ EWP Image")
+            try:
+                st.image(st.session_state.ewp_image_bytes, use_container_width=True)
+            except Exception as e:
+                st.error(f"❌ Failed to render image: {e}")
+
+        with col2:
+            st.markdown("### 📝 Raw OCR Text")
+            ocr_text = st.session_state.get("ewp_ocr_text", "")
+            if ocr_text:
+                st.text_area(
+                    "Extracted text",
+                    value=ocr_text,
+                    height=500,
+                    label_visibility="collapsed",
+                )
+            else:
+                st.info("ℹ️ No OCR text available yet.")
+
+        st.markdown("---")
+        st.markdown("### 🎯 Auto-Extracted Values")
+
+        try:
+            ewp_parsed = parse_ewp(st.session_state.ewp_image_bytes)
+            if ewp_parsed:
+                rows = [
+                    {
+                        "Placeholder": f"{{{{{k}}}}}",
+                        "Value": v,
+                        "Currently Set": get_value(k) or "—",
+                    }
+                    for k, v in ewp_parsed.items()
+                ]
+                st.dataframe(rows, use_container_width=True, hide_index=True)
+                st.success(f"✅ {len(ewp_parsed)} values extracted from OCR")
+            else:
+                st.warning(
+                    "⚠️ No values were extracted. "
+                    "Check the OCR text above — the image may be blurry or low resolution."
+                )
+        except Exception as e:
+            st.error(f"❌ Extraction failed: {e}")
+            st.exception(e)
 
 
 # ============================================================
