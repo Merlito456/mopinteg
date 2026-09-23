@@ -3,11 +3,10 @@ Replace {{PLACEHOLDER}} tokens in a .docx file while preserving formatting.
 Handles placeholders that may be split across multiple runs.
 """
 from docx import Document
-from docx.shared import Pt
 
 
 def _replace_in_paragraph(paragraph, mapping):
-    """Replace placeholders in a single paragraph, preserving formatting."""
+    """Replace placeholders in a single paragraph."""
     full_text = "".join(run.text for run in paragraph.runs)
     if "{{" not in full_text:
         return
@@ -19,7 +18,6 @@ def _replace_in_paragraph(paragraph, mapping):
             new_text = new_text.replace(token, str(value))
 
     if new_text != full_text:
-        # Write back: clear all runs, add a single run with the new text
         for run in paragraph.runs:
             run.text = ""
         if paragraph.runs:
@@ -38,10 +36,7 @@ def _replace_in_table(table, mapping):
 
 
 def replace_placeholders(docx_path, mapping, output_path):
-    """
-    Replace all placeholders in the DOCX file.
-    mapping: dict of {placeholder_key: value}
-    """
+    """Replace all placeholders in the DOCX file."""
     doc = Document(docx_path)
 
     # Body paragraphs
