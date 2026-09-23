@@ -90,6 +90,8 @@ if "debug_log" not in st.session_state:
     st.session_state.debug_log = []
 if "ole_debug_log" not in st.session_state:
     st.session_state.ole_debug_log = []
+if "fio_parse_debug" not in st.session_state:
+    st.session_state.fio_parse_debug = None
 
 
 # ============================================================
@@ -107,6 +109,13 @@ def reset_app():
     for key in list(st.session_state.keys()):
         del st.session_state[key]
     st.rerun()
+
+
+def clear_widget_caches():
+    """Clear all widget caches so fields re-read from placeholder_values."""
+    for k in list(st.session_state.keys()):
+        if k.startswith(("fio_", "ewp_", "doc_", "_last_")):
+            del st.session_state[k]
 
 
 def sync_widget_state(widget_key, external_value, default=""):
@@ -297,6 +306,34 @@ if fio_file and not st.session_state.fio_uploaded:
         try:
             fio_file.seek(0)
             parsed = parse_fio(fio_file)
+
+            # ⭐ Build debug info
+            expected_keys = [
+                "OLT_SITE", "OLT_MGMT_IP", "OLT_OM_VLAN", "OLT_OM_GW",
+                "VLAN_SIP", "VLAN_HSI", "VLAN_IPOE1", "VLAN_IPOE2",
+                "AN_SITE", "AN_TRUNK_ID", "AN_UPLINK_PORT",
+                "AG1_NODE", "AG2_NODE", "CX600_NODE",
+                "AGG_NODE", "AGG_NODE_OM", "AGG_NODE_IPOE1",
+                "BNG_NODE_SIP_HSI", "BNG_NODE_IPOE2",
+                "DHCP_BLOCK_OM", "DHCP_GW_OM",
+                "DHCP_BLOCK_SIP", "DHCP_GW_SIP",
+                "CX600_VE", "CX600_VE_L2", "CX600_VE_L3", "CX600_UPLINK_PORT",
+                "VCID_OM_PRIMARY", "VCID_SIP_PRIMARY", "VCID_HSI_PRIMARY",
+                "VCID_IPOE1_PRIMARY", "VCID_IPOE2_PRIMARY",
+                "VCID_OM_SECONDARY", "VCID_SIP_SECONDARY", "VCID_HSI_SECONDARY",
+                "VCID_IPOE1_SECONDARY", "VCID_IPOE2_SECONDARY",
+                "FIO_REF", "OLT_REGION", "CABINET_NAME",
+            ]
+            missing_from_parse = [k for k in expected_keys if k not in parsed]
+
+            st.session_state.fio_parse_debug = {
+                "total_keys": len(parsed),
+                "parsed": parsed,
+                "missing_from_parse": missing_from_parse,
+                "expected_count": len(expected_keys),
+            }
+
+            # Apply values
             for k, v in parsed.items():
                 set_value(k, v)
 
@@ -306,7 +343,13 @@ if fio_file and not st.session_state.fio_uploaded:
                     set_value("FIO_REF", name)
 
             st.session_state.fio_uploaded = True
+
+            # ⭐ Clear widget caches and force UI refresh
+            clear_widget_caches()
+
             st.success(f"✅ FIO parsed — {len(parsed)} values mapped")
+            st.rerun()
+
         except Exception as e:
             st.error(f"❌ Failed to parse FIO: {e}")
             st.exception(e)
@@ -337,10 +380,13 @@ if ewp_image and not st.session_state.ewp_uploaded:
                             set_value(k, v)
                             applied += 1
 
+                    clear_widget_caches()
+
                     st.success(
                         f"✅ EWP loaded — {len(ewp_parsed)} values extracted, "
                         f"{applied} applied, {len(candidates)} candidate sets for dropdowns"
                     )
+                    st.rerun()
                 except Exception as ocr_err:
                     st.warning(f"⚠️ OCR failed: {ocr_err}. Use dropdowns or AI paste.")
         else:
@@ -370,6 +416,29 @@ tab_fio, tab_ewp, tab_ai, tab_doc, tab_preview, tab_generate, tab_ocr = st.tabs(
 with tab_fio:
     st.subheader("FIO-Mapped Placeholders")
     st.caption("Auto-extracted from FIO. AI Paste and manual edits are reflected here.")
+
+    # ⭐ Show parse debug info
+    if st.session_state.get("fio_parse_debug"):
+        dbg = st.session_state.fio_parse_debug
+        with st.expander(
+            f"🐛 FIO Parse Debug — {dbg['total_keys']} keys (expected {dbg['expected_count']})",
+            expanded=False,
+        ):
+            st.markdown(f"**Total keys parsed:** {dbg['total_keys']}")
+
+            if dbg["missing_from_parse"]:
+                st.warning(
+                    f"⚠️ **{len(dbg['missing_from_parse'])} expected keys NOT parsed:**"
+                )
+                for k in dbg["missing_from_parse"]:
+                    current_val = get_value(k, "")
+                    marker = "🟡 has default" if current_val else "❌ empty"
+                    st.code(f"{k}  →  {marker}")
+            else:
+                st.success("✅ All expected keys parsed")
+
+            st.markdown("**Full parsed dict:**")
+            st.json(dbg["parsed"])
 
     if not st.session_state.fio_uploaded:
         st.warning("⚠️ Upload FIO Excel first.")
@@ -534,17 +603,12 @@ with tab_ai:
                         if k in all_known_keys:
                             set_value(k, v)
                             applied_keys.append(k)
-                            for prefix in ("fio_", "ewp_", "doc_", "ewp_dd_", "ewp_ti_"):
-                                ck = f"{prefix}{k}"
-                                if ck in st.session_state:
-                                    del st.session_state[ck]
-                                lk = f"_last_{ck}"
-                                if lk in st.session_state:
-                                    del st.session_state[lk]
                         else:
                             unknown_keys.append(k)
 
                     st.session_state.ai_updated_keys = set(applied_keys)
+                    clear_widget_caches()
+
                     st.success(f"✅ Applied {len(applied_keys)} values from AI response")
                     if unknown_keys:
                         st.warning(f"⚠️ {len(unknown_keys)} keys not recognized — skipped.")
@@ -599,9 +663,7 @@ with tab_ai:
         if st.button("🧹 Clear All Fields", use_container_width=True, key="clear_all_btn"):
             st.session_state.placeholder_values = {}
             st.session_state.ai_updated_keys = set()
-            for k in list(st.session_state.keys()):
-                if k.startswith(("fio_", "ewp_", "doc_", "_last_")):
-                    del st.session_state[k]
+            clear_widget_caches()
             st.success("✅ Cleared all fields.")
             st.rerun()
 
@@ -729,7 +791,7 @@ with tab_generate:
                 diag = check_placeholder_in_docx(TEMPLATE_PATH, "{{FIO_REF}}")
                 st.json(diag)
 
-            # ⭐ Scan for ALL placeholders including broken ones
+            # Scan for ALL placeholders including broken ones
             if st.button("🔍 Scan Template Placeholders", key="scan_btn"):
                 scan = scan_docx_for_placeholders(TEMPLATE_PATH)
 
@@ -788,7 +850,6 @@ with tab_generate:
                         if val:
                             mapping[key] = val
 
-                    # ⭐ Check if OLT_UPLINK_PORT is in mapping
                     st.session_state.debug_log.append(
                         f"Mapping keys: **{len(mapping)}**"
                     )
@@ -801,13 +862,12 @@ with tab_generate:
                             "❌ `OLT_UPLINK_PORT` NOT in mapping!"
                         )
 
-                    # Run replacer
                     replace_placeholders(TEMPLATE_PATH, mapping, step1_path)
                     st.session_state.debug_log.append(
                         f"✅ Step 1: Replaced {len(mapping)} placeholders → {step1_path}"
                     )
 
-                    # ⭐ Scan step1 output for remaining placeholders
+                    # Scan step1 output for remaining placeholders
                     scan_result = scan_docx_for_placeholders(step1_path)
                     st.session_state.debug_log.append("--- Scan of Step 1 output ---")
 
@@ -840,29 +900,9 @@ with tab_generate:
                         f"✅ Step 2: Inserted EWP image → {step2_path}"
                     )
 
-                    # Diagnostic on step2 BEFORE embed
-                    diag = check_placeholder_in_docx(step2_path, "{{FIO_REF}}")
-                    st.session_state.debug_log.append("--- Diagnostic on Step 2 output ---")
-                    st.session_state.debug_log.append(
-                        f"Exists in raw XML: **{diag['exists_raw']}**"
-                    )
-                    st.session_state.debug_log.append(
-                        f"Exists in concatenated: **{diag['exists_concatenated']}**"
-                    )
-
                     # --- Step 3: Embed FIO at {{FIO_REF}} ---
                     final_path = step2_path
                     has_attachment = bool(st.session_state.get("fio_attachment_bytes"))
-
-                    st.session_state.debug_log.append(
-                        f"FIO attachment bytes: **{len(st.session_state.get('fio_attachment_bytes') or b'')}**"
-                    )
-                    st.session_state.debug_log.append(
-                        f"PACKAGE_EMBED_AVAILABLE: **{PACKAGE_EMBED_AVAILABLE}**"
-                    )
-                    st.session_state.debug_log.append(
-                        f"OLE_EMBED_AVAILABLE: **{OLE_EMBED_AVAILABLE}**"
-                    )
 
                     if has_attachment:
                         try:
@@ -870,9 +910,6 @@ with tab_generate:
                                 step3_path = tmp3.name
 
                             if embed_method == "package" and PACKAGE_EMBED_AVAILABLE:
-                                st.session_state.debug_log.append(
-                                    "🔧 Using **Package** embedding..."
-                                )
                                 embed_excel_as_package(
                                     docx_path=step2_path,
                                     xlsx_bytes=st.session_state.fio_attachment_bytes,
@@ -886,9 +923,6 @@ with tab_generate:
                                 st.info("📦 FIO Excel embedded as Package at `{{FIO_REF}}`.")
 
                             elif OLE_EMBED_AVAILABLE:
-                                st.session_state.debug_log.append(
-                                    "🔧 Using **Legacy OLE** embedding..."
-                                )
                                 embed_excel_in_docx(
                                     docx_path=step2_path,
                                     xlsx_bytes=st.session_state.fio_attachment_bytes,
@@ -908,13 +942,6 @@ with tab_generate:
                         except ValueError as ve:
                             st.session_state.debug_log.append(f"❌ Step 3 ValueError: {ve}")
                             st.error(f"❌ Embed failed: {ve}")
-                            try:
-                                diag2 = diagnose_placeholder(step2_path, "{{FIO_REF}}")
-                                st.session_state.debug_log.append(
-                                    f"Diagnostic: {json.dumps(diag2, indent=2)}"
-                                )
-                            except Exception as de:
-                                st.session_state.debug_log.append(f"Diagnostic failed: {de}")
                         except Exception as embed_err:
                             st.session_state.debug_log.append(
                                 f"❌ Step 3 Exception: {embed_err}"
@@ -961,12 +988,6 @@ with tab_generate:
             st.markdown("### 🔍 Debug — Generation Steps")
             for line in st.session_state.debug_log:
                 st.markdown(f"- {line}")
-
-        # Display OLE debug log
-        if st.session_state.get("ole_debug_log"):
-            with st.expander("🔍 OLE/Embed Debug Log", expanded=False):
-                for line in st.session_state.ole_debug_log:
-                    st.code(line, language="text")
 
         if st.session_state.get("generated_file"):
             gen = st.session_state.generated_file
@@ -1020,28 +1041,18 @@ with tab_generate:
                             st.markdown(f"- OLE relationship: {'✅' if has_ole_rel else '❌'}")
                             st.markdown(f"- Package relationship: {'✅' if has_pkg_rel else '❌'}")
 
-                            shape_ids = re.findall(r'ShapeID="([^"]+)"', doc_xml)
-                            object_ids = re.findall(r'ObjectID="([^"]+)"', doc_xml)
-                            shape_unique = len(shape_ids) == len(set(shape_ids))
-                            object_unique = len(object_ids) == len(set(object_ids))
-                            st.markdown(f"- ShapeIDs unique: {'✅' if shape_unique else '❌'}")
-                            st.markdown(f"- ObjectIDs unique: {'✅' if object_unique else '❌'}")
-
-                        # ⭐ Also scan for remaining placeholders in output
-                        st.markdown("**Remaining placeholders in output:**")
-                        wt_runs = re.findall(
-                            r"<w:t(?:\s[^>]*)?>(.*?)</w:t>", doc_xml, re.DOTALL
-                        )
-                        concatenated = "".join(wt_runs)
-                        remaining = re.findall(
-                            r"\{\{[A-Z_][A-Z0-9_]*\}\}", concatenated
-                        )
-                        if remaining:
-                            st.warning(f"⚠️ {len(remaining)} placeholders remain:")
-                            for r in sorted(set(remaining)):
-                                st.code(r)
-                        else:
-                            st.success("✅ No placeholders remaining!")
+                            # Remaining placeholders
+                            wt_runs = re.findall(
+                                r"<w:t(?:\s[^>]*)?>(.*?)</w:t>", doc_xml, re.DOTALL
+                            )
+                            concatenated = "".join(wt_runs)
+                            remaining = re.findall(
+                                r"\{\{[A-Z_][A-Z0-9_]*\}\}", concatenated
+                            )
+                            if remaining:
+                                st.warning(f"⚠️ {len(remaining)} placeholders remain")
+                            else:
+                                st.success("✅ No placeholders remaining")
 
                         with st.expander("📄 Full file list"):
                             for n in sorted(names):
