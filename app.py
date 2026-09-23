@@ -123,14 +123,17 @@ def get_missing_keys():
 st.title("📄 MOP Automation — Nokia Lightspan MF-2 OLT Integration")
 st.markdown(
     """
-    Upload the **FIO Excel**, **EWP Image**, and optionally the **FIO Attachment**,
+    Upload the **FIO Excel** and **EWP Image**, verify the mapped values,
     then generate the filled **MOP Integration Template**.
+
+    The **FIO Excel** is automatically used for both:
+    - Parsing values into the MOP
+    - Embedding as an OLE object in Section 13 (Supporting Documents)
 
     **Fill methods:**
     1. 📊 **Auto-FIO** — parses values from the FIO Excel
     2. 🖼️ **Auto-OCR** — extracts values from the EWP image
     3. 🤖 **AI Paste** — paste Gemini-extracted JSON
-    4. 📎 **FIO Attachment** — embeds the actual Excel file in Section 13
     """
 )
 
@@ -146,7 +149,7 @@ with st.sidebar:
         "Upload FIO (.xlsx)",
         type=["xlsx"],
         key="fio_uploader",
-        help="Used to auto-extract values into the MOP.",
+        help="Used for both auto-parsing values AND embedding into Section 13.",
     )
     ewp_image = st.file_uploader(
         "Upload EWP Image (.jpg/.png)",
@@ -154,22 +157,41 @@ with st.sidebar:
         key="ewp_uploader",
         help="Used for OCR extraction and inserted into Section 9.",
     )
-    fio_attachment = st.file_uploader(
-        "Upload FIO Attachment (.xlsx)",
-        type=["xlsx"],
-        key="fio_attachment_uploader",
-        help="This .xlsx will be EMBEDDED as an OLE object in Section 13.",
-    )
 
-    # Store FIO attachment
-    if fio_attachment:
-        if st.session_state.fio_attachment_bytes is None:
-            st.session_state.fio_attachment_bytes = fio_attachment.read()
-            st.session_state.fio_attachment_name = fio_attachment.name
-            st.success(f"✅ Attachment loaded: {fio_attachment.name}")
+    # --- Auto-store FIO bytes for Section 13 attachment ---
+    if fio_file:
+        if st.session_state.get("fio_attachment_name") != fio_file.name:
+            try:
+                fio_bytes = fio_file.read()
+                st.session_state.fio_attachment_bytes = fio_bytes
+                st.session_state.fio_attachment_name = fio_file.name
+                fio_file.seek(0)  # reset pointer for parser
+            except Exception as e:
+                st.error(f"❌ Failed to read FIO: {e}")
 
-    if st.session_state.fio_attachment_bytes:
-        st.caption(f"📎 {st.session_state.fio_attachment_name}")
+    # Show attachment status
+    if st.session_state.get("fio_attachment_bytes"):
+        size_kb = len(st.session_state.fio_attachment_bytes) / 1024
+        st.caption(
+            f"📎 **Attachment ready:** `{st.session_state.fio_attachment_name}` "
+            f"({size_kb:.1f} KB)"
+        )
+
+    # --- Optional override ---
+    with st.expander("⚙️ Advanced — Different file for attachment", expanded=False):
+        st.caption("By default, the FIO above is embedded in Section 13.")
+        override_file = st.file_uploader(
+            "Override (.xlsx)",
+            type=["xlsx"],
+            key="fio_attachment_override",
+        )
+        if override_file:
+            try:
+                st.session_state.fio_attachment_bytes = override_file.read()
+                st.session_state.fio_attachment_name = override_file.name
+                st.success(f"✅ Override: {override_file.name}")
+            except Exception as e:
+                st.error(f"❌ Failed: {e}")
 
     st.markdown("---")
     st.markdown("### Step 2 — Review & Edit")
@@ -193,7 +215,7 @@ with st.sidebar:
     st.markdown(
         f"- FIO: {'✅ Loaded' if st.session_state.fio_uploaded else '❌ Not uploaded'}\n"
         f"- EWP Image: {'✅ Loaded' if st.session_state.ewp_uploaded else '❌ Not uploaded'}\n"
-        f"- FIO Attachment: {'✅ Loaded' if st.session_state.fio_attachment_bytes else '❌ Not uploaded'}\n"
+        f"- FIO Attachment: {'✅ Ready' if st.session_state.fio_attachment_bytes else '❌ None'}\n"
         f"- Template: {'✅ Found' if os.path.exists(TEMPLATE_PATH) else '❌ Missing'}\n"
         f"- OCR Engine: {'✅ Available' if EWP_OCR_AVAILABLE else '⚠️ Unavailable'}\n"
         f"- OLE Embedder: {'✅ Available' if OLE_EMBED_AVAILABLE else '⚠️ Unavailable'}"
@@ -217,11 +239,22 @@ with st.sidebar:
 if fio_file and not st.session_state.fio_uploaded:
     with st.spinner("Parsing FIO..."):
         try:
+            # Reset pointer in case sidebar already read it
+            fio_file.seek(0)
+
             parsed = parse_fio(fio_file)
             for k, v in parsed.items():
                 set_value(k, v)
+
+            # Ensure FIO_REF is set (used in Section 13 Description column)
+            if not parsed.get("FIO_REF"):
+                if st.session_state.get("fio_attachment_name"):
+                    name = os.path.splitext(st.session_state.fio_attachment_name)[0]
+                    set_value("FIO_REF", name)
+
             st.session_state.fio_uploaded = True
             st.success(f"✅ FIO parsed — {len(parsed)} values mapped")
+
         except Exception as e:
             st.error(f"❌ Failed to parse FIO: {e}")
             st.exception(e)
@@ -454,6 +487,7 @@ with tab_ai:
                             set_value(k, v)
                             applied_keys.append(k)
 
+                            # Clear widget cache
                             for prefix in ("fio_", "ewp_", "doc_", "ewp_dd_", "ewp_ti_"):
                                 ck = f"{prefix}{k}"
                                 if ck in st.session_state:
@@ -636,10 +670,12 @@ with tab_generate:
             f"1. Replace **{len(PLACEHOLDER_MAP)}** text placeholders",
             "2. Insert EWP image into `{{ewp_image}}`",
         ]
-        if st.session_state.get("fio_attachment_bytes"):
+        if st.session_state.get("fio_attachment_bytes") and OLE_EMBED_AVAILABLE:
             plan.append(
                 f"3. Embed **{st.session_state.fio_attachment_name}** as OLE object in Section 13"
             )
+        elif st.session_state.get("fio_attachment_bytes"):
+            plan.append("3. ⚠️ OLE Embedder unavailable — FIO will not be embedded")
         else:
             plan.append("3. ⚠️ No FIO attachment — Section 13 will show text only")
         st.markdown("\n".join(plan))
@@ -678,7 +714,7 @@ with tab_generate:
                     image_stream = BytesIO(ewp_bytes)
                     replace_ewp_image(step1_path, image_stream, step2_path)
 
-                    # --- Step 3: Embed FIO Excel attachment (if uploaded) ---
+                    # --- Step 3: Embed FIO Excel attachment (if available) ---
                     final_path = step2_path
 
                     if st.session_state.get("fio_attachment_bytes") and OLE_EMBED_AVAILABLE:
