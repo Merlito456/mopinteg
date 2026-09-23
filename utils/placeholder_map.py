@@ -21,7 +21,7 @@ PLACEHOLDER_MAP = [
     # ============================================================
     # NETWORK ELEMENTS
     # ============================================================
-    {"key": "OLT_PRODUCT", "label": "OLT Product", "source": "EWP", "group": "Network Elements", "default": "Lightspan MF-2"},
+    {"key": "OLT_PRODUCT", "label": "OLT Product", "source": "EWP", "group": "Network Elements", "default": "MF-2"},
     {"key": "OLT_PRODUCT_SHORT", "label": "OLT Product (Short)", "source": "DOC", "group": "Network Elements", "default": "MF-2"},
     {"key": "OLT_SITE", "label": "OLT Site", "source": "FIO", "group": "Network Elements"},
     {"key": "OLT_MGMT_IP", "label": "OLT Management IP", "source": "FIO", "group": "Network Elements"},
