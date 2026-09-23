@@ -265,7 +265,7 @@ def parse_fio(file) -> dict:
         "VCID_IPOE2_SECONDARY": "3912682705",
         "OLT_UPLINK_PORT": "1/1/1",
         "OLT_LAG_ID": "10",
-        "OLT_PRODUCT": "Lightspan MF-2",
+        "OLT_PRODUCT": "MF-2",
         "OLT_PRODUCT_SHORT": "MF-2",
         "AN_PRODUCT": "ATN 980C",
         "AN_PRODUCT_FAMILY": "ATN Series Equipment",
