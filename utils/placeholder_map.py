@@ -9,14 +9,15 @@ Each entry defines:
 """
 
 PLACEHOLDER_MAP = [
-    # ============================================================
-    # DOCUMENT METADATA
-    # ============================================================
-    {"key": "CIRCUIT_ID", "label": "Circuit / Project ID", "source": "DOC", "group": "Document Metadata", "default": "B2C VMDU FTH"},
-    {"key": "VERSION", "label": "MOP Version", "source": "DOC", "group": "Document Metadata", "default": "1.1"},
-    {"key": "DATE", "label": "Document Date", "source": "DOC", "group": "Document Metadata", "default": "2026-07-31"},
-    {"key": "DATE_PRIMARY", "label": "Primary Implementation Date", "source": "DOC", "group": "Document Metadata", "default": "July 31, 2026"},
-    {"key": "DATE_SECONDARY", "label": "Secondary Implementation Date", "source": "DOC", "group": "Document Metadata", "default": "August 1, 2026"},
+# ============================================================
+# DOCUMENT METADATA
+# ============================================================
+{"key": "SITE_NAME", "label": "Site Name (Ring)", "source": "DOC", "group": "Document Metadata", "default": "LCGCDO"},
+{"key": "CIRCUIT_ID", "label": "Circuit / Project ID", "source": "DOC", "group": "Document Metadata", "default": "B2C VMDU FTH"},
+{"key": "VERSION", "label": "MOP Version", "source": "DOC", "group": "Document Metadata", "default": "1.1"},
+{"key": "DATE", "label": "Document Date", "source": "DOC", "group": "Document Metadata", "default": "2026-07-31"},
+{"key": "DATE_PRIMARY", "label": "Primary Implementation Date", "source": "DOC", "group": "Document Metadata", "default": "July 31, 2026"},
+{"key": "DATE_SECONDARY", "label": "Secondary Implementation Date", "source": "DOC", "group": "Document Metadata", "default": "August 1, 2026"},
 
     # ============================================================
     # NETWORK ELEMENTS
