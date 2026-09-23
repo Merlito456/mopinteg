@@ -28,10 +28,27 @@ ICON_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relations
 
 
 # ============================================================
+# Required namespaces for OLE embedding
+# ============================================================
+REQUIRED_NAMESPACES = {
+    "xmlns:o": "urn:schemas-microsoft-com:office:office",
+    "xmlns:v": "urn:schemas-microsoft-com:vml",
+    "xmlns:w10": "urn:schemas-microsoft-com:office:word",
+    "xmlns:r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    "xmlns:w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+    "xmlns:w14": "http://schemas.microsoft.com/office/word/2010/wordml",
+    "xmlns:w15": "http://schemas.microsoft.com/office/word/2012/wordml",
+    "xmlns:wp": "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+    "xmlns:wp14": "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing",
+    "xmlns:mc": "http://schemas.openxmlformats.org/markup-compatibility/2006",
+}
+
+
+# ============================================================
 # Diagnostic logger
 # ============================================================
 def _log(msg: str):
-    """Print to stdout (Streamlit logs it) AND to session state for UI display."""
+    """Print to stdout (Streamlit logs it) AND to session state for UI."""
     print(f"[OLE] {msg}")
     try:
         import streamlit as st
@@ -40,6 +57,39 @@ def _log(msg: str):
         st.session_state.ole_debug_log.append(msg)
     except Exception:
         pass
+
+
+# ============================================================
+# Namespace fix — CRITICAL for OLE to render
+# ============================================================
+def _ensure_required_namespaces(doc_xml: str) -> str:
+    """
+    Ensure document.xml has all namespaces required for OLE embedding.
+    Word needs: xmlns:o, xmlns:v, xmlns:w10, xmlns:r, xmlns:w
+    """
+    # Find the <w:document ...> opening tag
+    doc_tag_match = re.search(r"<w:document\b[^>]*>", doc_xml)
+    if not doc_tag_match:
+        _log("  [NS] ⚠️ Could not find <w:document> tag")
+        return doc_xml
+
+    doc_tag = doc_tag_match.group(0)
+    new_tag = doc_tag
+    added = []
+
+    for ns_prefix, ns_uri in REQUIRED_NAMESPACES.items():
+        # Check if namespace is already declared (as xmlns:prefix or xmlns:prefix=)
+        if f"{ns_prefix}=" not in doc_tag:
+            new_tag = new_tag[:-1] + f' {ns_prefix}="{ns_uri}">'
+            added.append(ns_prefix)
+
+    if new_tag != doc_tag:
+        doc_xml = doc_xml.replace(doc_tag, new_tag, 1)
+        _log(f"  [NS] Added namespaces: {', '.join(added)}")
+    else:
+        _log("  [NS] All namespaces already present")
+
+    return doc_xml
 
 
 # ============================================================
@@ -54,19 +104,6 @@ def embed_excel_in_docx(
 ) -> str:
     """
     Replace a {{FIO_REF}} placeholder in a DOCX with a real OLE-embedded Excel file.
-
-    Args:
-        docx_path: Path to the input .docx
-        xlsx_bytes: Raw bytes of the .xlsx file to embed
-        xlsx_filename: Original filename (used for icon display name)
-        placeholder: The placeholder token to replace (default: {{FIO_REF}})
-        output_path: Where to save the output. If None, uses *_with_attachment.docx
-
-    Returns:
-        Path to the generated .docx
-
-    Raises:
-        ValueError: If placeholder not found OR replacement fails
     """
     docx_path = Path(docx_path)
     if output_path is None:
@@ -74,7 +111,6 @@ def embed_excel_in_docx(
     else:
         output_path = Path(output_path)
 
-    # ---- Diagnostic logging ----
     _log("=" * 60)
     _log("EMBED EXCEL — START")
     _log(f"  Source:      {docx_path}")
@@ -83,7 +119,7 @@ def embed_excel_in_docx(
     _log(f"  XLSX bytes:  {len(xlsx_bytes):,}")
     _log(f"  XLSX name:   {xlsx_filename}")
 
-    # 1. Extract DOCX (it's a ZIP)
+    # 1. Extract DOCX
     temp_dir = docx_path.parent / f"_temp_ole_{docx_path.stem}"
     if temp_dir.exists():
         shutil.rmtree(temp_dir)
@@ -112,7 +148,6 @@ def embed_excel_in_docx(
         _log(f"  [2] Context: ...{snippet}...")
 
     if placeholder not in doc_xml:
-        # Case-insensitive fallback
         if placeholder.upper() in doc_xml.upper():
             _log("  [2] ⚠️ Found case-insensitive match")
             idx = doc_xml.upper().find(placeholder.upper())
@@ -184,8 +219,10 @@ def embed_excel_in_docx(
     if not replaced:
         raise ValueError(
             f"Placeholder '{placeholder}' was found but could not be replaced. "
-            "Check that the placeholder is not split across multiple <w:t> tags."
         )
+
+    # ⭐ 8b. Ensure required namespaces are declared
+    doc_xml = _ensure_required_namespaces(doc_xml)
 
     doc_xml_path.write_text(doc_xml, encoding="utf-8")
     _log(f"  [8] document.xml updated ({len(doc_xml):,} chars)")
@@ -249,11 +286,7 @@ def _ensure_excel_icon(temp_dir: Path, ole_index: int) -> tuple:
 
 
 def _generate_excel_icon_bytes() -> bytes:
-    """
-    Generate a 48x48 Excel-green icon PNG.
-    Tries to load a real icon from assets/excel_icon.png first.
-    """
-    # Try to load a real icon file
+    """Generate a 48x48 Excel-green icon PNG."""
     icon_file = Path(__file__).parent.parent / "assets" / "excel_icon.png"
     if icon_file.exists():
         with open(icon_file, "rb") as f:
@@ -263,9 +296,7 @@ def _generate_excel_icon_bytes() -> bytes:
         from PIL import Image, ImageDraw
         img = Image.new("RGBA", (48, 48), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-        # Excel green rounded square
         draw.rounded_rectangle([(2, 2), (46, 46)], radius=6, fill=(33, 115, 70, 255))
-        # White "X" for Excel
         draw.line([(14, 14), (34, 34)], fill="white", width=4)
         draw.line([(34, 14), (14, 34)], fill="white", width=4)
 
@@ -273,7 +304,6 @@ def _generate_excel_icon_bytes() -> bytes:
         img.save(buf, format="PNG")
         return buf.getvalue()
     except ImportError:
-        # Fallback: 1x1 transparent PNG
         return (
             b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
             b"\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
@@ -283,35 +313,39 @@ def _generate_excel_icon_bytes() -> bytes:
 
 
 # ============================================================
-# OLE Object XML Builder — WITH FILENAME DISPLAY
+# OLE Object XML Builder — Word-compatible
 # ============================================================
 def _build_ole_xml(ole_rid: str, icon_rid: str, display_name: str) -> str:
     """
-    Build the OLE object XML with icon + filename display.
-    Word shows: [📊 Excel icon] filename.xlsx
+    Build the OLE object XML matching Word's native embedded object structure.
+
+    Key details from real Word output:
+    - <w:rPr><w:noProof/></w:rPr> comes BEFORE <w:object>
+    - w14:anchorId is present
+    - v:shape has o:ole="" attribute
+    - ShapeID matches v:shape id
+    - o:FieldCodes uses \s (backslash s)
     """
     safe_name = html.escape(display_name)
 
     ole_xml = (
-        # ---- OLE object run (icon) ----
         '<w:r>'
-        '<w:object w:dxaOrig="1440" w:dyaOrig="1440">'
-        # Icon visual — bigger (32pt)
-        '<v:shape id="_x0000_i1025" type="#_x0000_t75" '
-        'style="width:32pt;height:32pt" fillcolor="auto" stroked="f">'
+        '<w:rPr><w:noProof/></w:rPr>'
+        '<w:object w:dxaOrig="1440" w:dyaOrig="1440" w14:anchorId="4C8D24A8">'
+        # ---- Icon shape (matches ShapeID below) ----
+        '<v:shape id="_x0000_i1027" type="#_x0000_t75" '
+        'style="width:32pt;height:32pt" o:ole="">'
         f'<v:imagedata r:id="{icon_rid}" o:title="{safe_name}"/>'
         '</v:shape>'
-        # OLE object reference
+        # ---- OLE object reference ----
         f'<o:OLEObject Type="Embed" ProgID="{OLE_PROG_ID}" '
-        'ShapeID="_x0000_i1025" DrawAspect="Icon" '
-        'ObjectID="_1234567890" '
+        'ShapeID="_x0000_i1027" DrawAspect="Icon" ObjectID="_1625429161" '
         f'r:id="{ole_rid}">'
         '<o:FieldCodes>\\s</o:FieldCodes>'
         '</o:OLEObject>'
         '</w:object>'
-        '<w:rPr><w:noProof/></w:rPr>'
         '</w:r>'
-        # ---- Filename text run (displayed after the icon) ----
+        # ---- Filename text after the icon ----
         '<w:r>'
         '<w:rPr><w:noProof/></w:rPr>'
         f'<w:t xml:space="preserve"> {safe_name}</w:t>'
@@ -339,7 +373,7 @@ def _replace_placeholder_with_ole(doc_xml: str, placeholder: str, ole_xml: str) 
             doc_xml = doc_xml.replace(pattern, ole_xml, 1)
             return doc_xml, True
 
-    # Strategy 2: Regex match on <w:t ...>...</w:t>
+    # Strategy 2: Regex match
     regex = re.compile(
         r"<w:t(?:\s[^>]*)?>" + re.escape(placeholder) + r"</w:t>",
         re.DOTALL,
@@ -361,7 +395,7 @@ def _replace_placeholder_with_ole(doc_xml: str, placeholder: str, ole_xml: str) 
 # Standalone diagnostic
 # ============================================================
 def diagnose_placeholder(docx_path: str, placeholder: str = "{{FIO_REF}}") -> dict:
-    """Standalone diagnostic tool: check if a placeholder exists in the DOCX."""
+    """Standalone diagnostic tool."""
     docx_path = Path(docx_path)
     result = {
         "placeholder": placeholder,
@@ -370,6 +404,10 @@ def diagnose_placeholder(docx_path: str, placeholder: str = "{{FIO_REF}}") -> di
         "context": "",
         "w_t_patterns": [],
         "run_count": 0,
+        "has_ole_xml": False,
+        "has_ole_bin": False,
+        "has_ole_rel": False,
+        "namespaces": {},
     }
 
     temp_dir = docx_path.parent / f"_diag_{docx_path.stem}"
@@ -396,6 +434,24 @@ def diagnose_placeholder(docx_path: str, placeholder: str = "{{FIO_REF}}") -> di
         concatenated = "".join(wt_runs)
         result["exists_concatenated"] = placeholder in concatenated
 
+        # Check OLE presence
+        result["has_ole_xml"] = "<o:OLEObject" in doc_xml
+
+        # Check namespaces
+        for ns in ["xmlns:o", "xmlns:v", "xmlns:w10", "xmlns:r", "xmlns:w14"]:
+            result["namespaces"][ns] = f'{ns}=' in doc_xml
+
+        # Check embeddings
+        embeddings = list((temp_dir / "word" / "embeddings").glob("*.bin"))
+        result["has_ole_bin"] = len(embeddings) > 0
+
+        # Check rels
+        rels_path = temp_dir / "word" / "_rels" / "document.xml.rels"
+        if rels_path.exists():
+            rels_xml = rels_path.read_text(encoding="utf-8")
+            result["has_ole_rel"] = "oleObject" in rels_xml
+
+        # Context
         if placeholder in doc_xml:
             idx = doc_xml.find(placeholder)
             result["context"] = doc_xml[max(0, idx - 150):idx + 150]
