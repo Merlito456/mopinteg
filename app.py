@@ -13,7 +13,7 @@ from utils.placeholder_map import (
     get_fio_keys, get_ewp_keys, get_doc_keys, get_vault_keys,
 )
 from utils.fio_parser import parse_fio
-from utils.docx_replacer import replace_placeholders
+from utils.docx_replacer import replace_placeholders, scan_docx_for_placeholders
 from utils.image_replacer import replace_ewp_image
 
 try:
@@ -25,7 +25,7 @@ except Exception:
     get_ocr_text = None
     extract_candidates = None
 
-# ⭐ Try Package approach first, fall back to legacy OLE
+# Try Package approach first, fall back to legacy OLE
 try:
     from utils.ole_embedder import (
         embed_excel_as_package,
@@ -724,16 +724,36 @@ with tab_generate:
         # Pre-generation diagnostic
         with st.expander("🔍 Pre-Generation Diagnostic — Check Template", expanded=False):
             st.caption("Verify `{{FIO_REF}}` exists in the template before generating.")
+
             if st.button("🔍 Run Diagnostic on Template", key="diag_btn"):
                 diag = check_placeholder_in_docx(TEMPLATE_PATH, "{{FIO_REF}}")
                 st.json(diag)
+
+            # ⭐ Scan for ALL placeholders including broken ones
+            if st.button("🔍 Scan Template Placeholders", key="scan_btn"):
+                scan = scan_docx_for_placeholders(TEMPLATE_PATH)
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("✅ Valid", len(scan.get("valid", [])))
+                with col2:
+                    st.metric("⚠️ Broken", len(scan.get("broken", [])))
+
+                if scan.get("broken"):
+                    st.error("**Broken placeholders found:**")
+                    for b in scan["broken"]:
+                        st.code(f"{b['text']}  (open={b['open_braces']}, close={b['close_braces']})")
+
+                with st.expander("📋 All valid placeholders"):
+                    for v in scan.get("valid", []):
+                        st.code(v["text"])
 
         missing_keys = get_missing_keys()
         if missing_keys:
             st.warning(f"⚠️ **{len(missing_keys)}** fields still empty.")
 
         # Embedding method selector
-        embed_method = "package"  # default
+        embed_method = "package"
         if PACKAGE_EMBED_AVAILABLE and OLE_EMBED_AVAILABLE:
             with st.expander("⚙️ Embedding Method", expanded=False):
                 embed_method = st.radio(
@@ -768,10 +788,47 @@ with tab_generate:
                         if val:
                             mapping[key] = val
 
+                    # ⭐ Check if OLT_UPLINK_PORT is in mapping
+                    st.session_state.debug_log.append(
+                        f"Mapping keys: **{len(mapping)}**"
+                    )
+                    if "OLT_UPLINK_PORT" in mapping:
+                        st.session_state.debug_log.append(
+                            f"✅ `OLT_UPLINK_PORT` = `{mapping['OLT_UPLINK_PORT']}`"
+                        )
+                    else:
+                        st.session_state.debug_log.append(
+                            "❌ `OLT_UPLINK_PORT` NOT in mapping!"
+                        )
+
+                    # Run replacer
                     replace_placeholders(TEMPLATE_PATH, mapping, step1_path)
                     st.session_state.debug_log.append(
                         f"✅ Step 1: Replaced {len(mapping)} placeholders → {step1_path}"
                     )
+
+                    # ⭐ Scan step1 output for remaining placeholders
+                    scan_result = scan_docx_for_placeholders(step1_path)
+                    st.session_state.debug_log.append("--- Scan of Step 1 output ---")
+
+                    if scan_result.get("valid"):
+                        st.session_state.debug_log.append(
+                            f"⚠️ Valid placeholders still present: **{len(scan_result['valid'])}**"
+                        )
+                        for v in scan_result["valid"][:20]:
+                            in_map = v["key"] in mapping
+                            st.session_state.debug_log.append(
+                                f"  - `{v['text']}` (in map: {in_map})"
+                            )
+
+                    if scan_result.get("broken"):
+                        st.session_state.debug_log.append(
+                            f"⚠️ Broken placeholders: **{len(scan_result['broken'])}**"
+                        )
+                        for b in scan_result["broken"][:20]:
+                            st.session_state.debug_log.append(
+                                f"  - `{b['text']}` (open={b['open_braces']}, close={b['close_braces']})"
+                            )
 
                     # --- Step 2: Insert EWP image ---
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp2:
@@ -812,7 +869,6 @@ with tab_generate:
                             with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp3:
                                 step3_path = tmp3.name
 
-                            # Prefer Package, fall back to OLE
                             if embed_method == "package" and PACKAGE_EMBED_AVAILABLE:
                                 st.session_state.debug_log.append(
                                     "🔧 Using **Package** embedding..."
@@ -926,7 +982,6 @@ with tab_generate:
             )
             st.caption(f"File: `{gen['filename']}` — {len(gen['bytes']) / 1024:.1f} KB")
 
-            # Verify button
             if st.button("🔍 Verify Embedding", key="verify_embed_btn"):
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
                     tmp.write(gen["bytes"])
@@ -965,13 +1020,28 @@ with tab_generate:
                             st.markdown(f"- OLE relationship: {'✅' if has_ole_rel else '❌'}")
                             st.markdown(f"- Package relationship: {'✅' if has_pkg_rel else '❌'}")
 
-                            # ID uniqueness
                             shape_ids = re.findall(r'ShapeID="([^"]+)"', doc_xml)
                             object_ids = re.findall(r'ObjectID="([^"]+)"', doc_xml)
                             shape_unique = len(shape_ids) == len(set(shape_ids))
                             object_unique = len(object_ids) == len(set(object_ids))
                             st.markdown(f"- ShapeIDs unique: {'✅' if shape_unique else '❌'}")
                             st.markdown(f"- ObjectIDs unique: {'✅' if object_unique else '❌'}")
+
+                        # ⭐ Also scan for remaining placeholders in output
+                        st.markdown("**Remaining placeholders in output:**")
+                        wt_runs = re.findall(
+                            r"<w:t(?:\s[^>]*)?>(.*?)</w:t>", doc_xml, re.DOTALL
+                        )
+                        concatenated = "".join(wt_runs)
+                        remaining = re.findall(
+                            r"\{\{[A-Z_][A-Z0-9_]*\}\}", concatenated
+                        )
+                        if remaining:
+                            st.warning(f"⚠️ {len(remaining)} placeholders remain:")
+                            for r in sorted(set(remaining)):
+                                st.code(r)
+                        else:
+                            st.success("✅ No placeholders remaining!")
 
                         with st.expander("📄 Full file list"):
                             for n in sorted(names):
