@@ -6,6 +6,7 @@ import tempfile
 import os
 import json
 import re
+import zipfile
 
 from utils.placeholder_map import (
     PLACEHOLDER_MAP, get_groups, get_by_group,
@@ -25,11 +26,12 @@ except Exception:
     extract_candidates = None
 
 try:
-    from utils.ole_embedder import embed_excel_in_docx
+    from utils.ole_embedder import embed_excel_in_docx, diagnose_placeholder
     OLE_EMBED_AVAILABLE = True
 except Exception:
     OLE_EMBED_AVAILABLE = False
     embed_excel_in_docx = None
+    diagnose_placeholder = None
 
 from utils.ai_prompt import GEMINI_PROMPT_TEMPLATE, parse_ai_response
 
@@ -70,6 +72,8 @@ if "generated_file" not in st.session_state:
     st.session_state.generated_file = None
 if "ai_updated_keys" not in st.session_state:
     st.session_state.ai_updated_keys = set()
+if "debug_log" not in st.session_state:
+    st.session_state.debug_log = []
 
 
 # ============================================================
@@ -90,7 +94,6 @@ def reset_app():
 
 
 def sync_widget_state(widget_key, external_value, default=""):
-    """Sync a widget's state with an external value from placeholder_values."""
     effective_value = external_value if external_value else default
     last_key = f"_last_{widget_key}"
     last_synced_val = st.session_state.get(last_key, None)
@@ -106,20 +109,57 @@ def sync_widget_state(widget_key, external_value, default=""):
 
 
 def get_missing_keys():
-    """
-    Return list of placeholder keys with no value AND no default.
-    Excludes FIO_REF because it's handled by the OLE embedder.
-    """
     missing = []
     for p in PLACEHOLDER_MAP:
         key = p["key"]
         if key == "FIO_REF":
-            continue  # Skip — replaced by OLE embedder
+            continue
         val = get_value(key, "")
         default = p.get("default", "")
         if not val and not default:
             missing.append(p)
     return missing
+
+
+def check_placeholder_in_docx(docx_path, placeholder):
+    """Check if a placeholder exists in the DOCX and how it's stored."""
+    result = {
+        "exists_raw": False,
+        "exists_concatenated": False,
+        "near_matches": [],
+        "runs_with_ref": [],
+    }
+    try:
+        with zipfile.ZipFile(docx_path, "r") as z:
+            doc_xml = z.read("word/document.xml").decode("utf-8")
+
+        result["exists_raw"] = placeholder in doc_xml
+
+        wt_runs = re.findall(r"<w:t(?:\s[^>]*)?>(.*?)</w:t>", doc_xml, re.DOTALL)
+        concatenated = "".join(wt_runs)
+        result["exists_concatenated"] = placeholder in concatenated
+
+        # Find near matches
+        for term in ["FIO", "REF", "{FIO", "FIO_REF", "{{FIO"]:
+            idx = concatenated.find(term)
+            if idx >= 0:
+                snippet = concatenated[max(0, idx - 30):idx + 40]
+                result["near_matches"].append({
+                    "term": term,
+                    "snippet": snippet,
+                })
+
+        # Find runs with "REF" or "FIO"
+        for i, run in enumerate(wt_runs):
+            if "FIO" in run or "REF" in run or "{" in run:
+                result["runs_with_ref"].append({
+                    "index": i,
+                    "text": run,
+                })
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
 
 
 # ============================================================
@@ -163,18 +203,16 @@ with st.sidebar:
         help="Used for OCR extraction and inserted into Section 9.",
     )
 
-    # --- Auto-store FIO bytes for Section 13 attachment ---
     if fio_file:
         if st.session_state.get("fio_attachment_name") != fio_file.name:
             try:
                 fio_bytes = fio_file.read()
                 st.session_state.fio_attachment_bytes = fio_bytes
                 st.session_state.fio_attachment_name = fio_file.name
-                fio_file.seek(0)  # reset pointer for parser
+                fio_file.seek(0)
             except Exception as e:
                 st.error(f"❌ Failed to read FIO: {e}")
 
-    # Show attachment status
     if st.session_state.get("fio_attachment_bytes"):
         size_kb = len(st.session_state.fio_attachment_bytes) / 1024
         st.caption(
@@ -182,7 +220,6 @@ with st.sidebar:
             f"({size_kb:.1f} KB)"
         )
 
-    # --- Optional override ---
     with st.expander("⚙️ Advanced — Different file for attachment", expanded=False):
         st.caption("By default, the FIO above is embedded at `{{FIO_REF}}`.")
         override_file = st.file_uploader(
@@ -244,14 +281,11 @@ with st.sidebar:
 if fio_file and not st.session_state.fio_uploaded:
     with st.spinner("Parsing FIO..."):
         try:
-            # Reset pointer in case sidebar already read it
             fio_file.seek(0)
-
             parsed = parse_fio(fio_file)
             for k, v in parsed.items():
                 set_value(k, v)
 
-            # Ensure FIO_REF is set (used as the OLE embed anchor)
             if not parsed.get("FIO_REF"):
                 if st.session_state.get("fio_attachment_name"):
                     name = os.path.splitext(st.session_state.fio_attachment_name)[0]
@@ -259,7 +293,6 @@ if fio_file and not st.session_state.fio_uploaded:
 
             st.session_state.fio_uploaded = True
             st.success(f"✅ FIO parsed — {len(parsed)} values mapped")
-
         except Exception as e:
             st.error(f"❌ Failed to parse FIO: {e}")
             st.exception(e)
@@ -342,7 +375,6 @@ with tab_fio:
 
                     display_label = f"🆕 {label}" if key in st.session_state.ai_updated_keys else label
 
-                    # Show ℹ️ icon for FIO_REF (it's replaced by OLE embedder)
                     help_text = None
                     if key == "FIO_REF":
                         help_text = "This value is used as the anchor for the OLE-embedded Excel file."
@@ -356,7 +388,7 @@ with tab_fio:
 
 
 # ============================================================
-# TAB 2: EWP-ONLY (DROPDOWN + TEXT)
+# TAB 2: EWP-ONLY
 # ============================================================
 with tab_ewp:
     st.subheader("EWP-Only Placeholders")
@@ -451,18 +483,10 @@ with tab_ai:
             "FIELD DESCRIPTIONS:\n"
             + "\n".join(f'- {p["key"]}: {p["label"]}' for p in missing_keys)
         )
-
-        st.info(
-            f"💡 **{len(missing_keys)} fields still empty.** "
-            "The prompt below focuses on those fields only."
-        )
+        st.info(f"💡 **{len(missing_keys)} fields still empty.** Prompt focuses on those fields.")
         st.code(focused_prompt, language="markdown")
-
         st.markdown("#### 📋 Or copy this JSON template directly")
-        st.code(
-            json.dumps({p["key"]: "" for p in missing_keys}, indent=2),
-            language="json",
-        )
+        st.code(json.dumps({p["key"]: "" for p in missing_keys}, indent=2), language="json")
     else:
         st.success("✅ All fields already filled! Full prompt shown for reference.")
         st.code(GEMINI_PROMPT_TEMPLATE, language="markdown")
@@ -488,7 +512,6 @@ with tab_ai:
             else:
                 try:
                     parsed = parse_ai_response(ai_response)
-
                     applied_keys = []
                     unknown_keys = []
                     all_known_keys = {p["key"] for p in PLACEHOLDER_MAP}
@@ -497,8 +520,6 @@ with tab_ai:
                         if k in all_known_keys:
                             set_value(k, v)
                             applied_keys.append(k)
-
-                            # Clear widget cache
                             for prefix in ("fio_", "ewp_", "doc_", "ewp_dd_", "ewp_ti_"):
                                 ck = f"{prefix}{k}"
                                 if ck in st.session_state:
@@ -511,19 +532,11 @@ with tab_ai:
 
                     st.session_state.ai_updated_keys = set(applied_keys)
                     st.success(f"✅ Applied {len(applied_keys)} values from AI response")
-
                     if unknown_keys:
                         st.warning(f"⚠️ {len(unknown_keys)} keys not recognized — skipped.")
-
                     with st.expander("📋 Applied values", expanded=False):
                         st.json({k: parsed[k] for k in applied_keys})
-
-                    if unknown_keys:
-                        with st.expander(f"❌ Unknown keys ({len(unknown_keys)})", expanded=False):
-                            st.write(unknown_keys)
-
                     st.rerun()
-
                 except ValueError as e:
                     st.error(f"❌ Failed to parse AI response: {e}")
                     with st.expander("🔍 Debug — view pasted text", expanded=False):
@@ -545,8 +558,6 @@ with tab_ai:
                     st.error(f"❌ Failed to parse: {e}")
                     with st.expander("🔍 View raw pasted text", expanded=True):
                         st.code(ai_response[:2000], language="text")
-                except Exception as e:
-                    st.error(f"❌ Unexpected error: {e}")
 
     st.markdown("---")
     st.markdown("### 🎯 Missing Fields")
@@ -555,7 +566,6 @@ with tab_ai:
         st.success("✅ All placeholders are filled!")
     else:
         st.warning(f"⚠️ {len(missing_keys)} fields still empty")
-
         empty_df = [
             {
                 "Placeholder": f"{{{{{p['key']}}}}}",
@@ -606,7 +616,6 @@ with tab_doc:
                 widget_key = f"doc_{key}"
 
                 sync_widget_state(widget_key, current, default)
-
                 display_label = f"🆕 {label}" if key in st.session_state.ai_updated_keys else label
 
                 with cols[i % 2]:
@@ -679,31 +688,32 @@ with tab_generate:
 
         # Show generation plan
         st.markdown("#### 📋 Generation Plan")
-        # Count placeholders excluding FIO_REF
         placeholder_count = len([p for p in PLACEHOLDER_MAP if p["key"] != "FIO_REF"])
         plan = [
             f"1. Replace **{placeholder_count}** text placeholders (excludes `{{{{FIO_REF}}}}`)",
             "2. Insert EWP image into `{{ewp_image}}`",
         ]
         if st.session_state.get("fio_attachment_bytes") and OLE_EMBED_AVAILABLE:
-            plan.append(
-                f"3. Embed **{st.session_state.fio_attachment_name}** as OLE object at `{{{{FIO_REF}}}}`"
-            )
+            plan.append(f"3. Embed **{st.session_state.fio_attachment_name}** as OLE at `{{{{FIO_REF}}}}`")
         elif st.session_state.get("fio_attachment_bytes"):
-            plan.append("3. ⚠️ OLE Embedder unavailable — falling back to text")
+            plan.append("3. ⚠️ OLE Embedder unavailable")
         else:
-            plan.append("3. ⚠️ No FIO attachment — `{{FIO_REF}}` will stay as text")
+            plan.append("3. ⚠️ No FIO attachment")
         st.markdown("\n".join(plan))
 
-        # Warn about missing fields
+        # Pre-generation diagnostic
+        with st.expander("🔍 Pre-Generation Diagnostic — Check Template", expanded=False):
+            st.caption("Verify `{{FIO_REF}}` exists in the template before generating.")
+            if st.button("🔍 Run Diagnostic on Template", key="diag_btn"):
+                diag = check_placeholder_in_docx(TEMPLATE_PATH, "{{FIO_REF}}")
+                st.json(diag)
+
         missing_keys = get_missing_keys()
         if missing_keys:
-            st.warning(
-                f"⚠️ **{len(missing_keys)}** fields still empty — they will remain "
-                f"as `{{{{PLACEHOLDER}}}}` in the generated DOCX."
-            )
+            st.warning(f"⚠️ **{len(missing_keys)}** fields still empty.")
 
         if generate_btn:
+            st.session_state.debug_log = []
             with st.spinner("Generating MOP..."):
                 step1_path = None
                 step2_path = None
@@ -716,7 +726,6 @@ with tab_generate:
                     mapping = {}
                     for p in PLACEHOLDER_MAP:
                         key = p["key"]
-                        # Skip FIO_REF — it's replaced by OLE embedder in Step 3
                         if key == "FIO_REF":
                             continue
                         val = get_value(key, p.get("default", ""))
@@ -724,6 +733,7 @@ with tab_generate:
                             mapping[key] = val
 
                     replace_placeholders(TEMPLATE_PATH, mapping, step1_path)
+                    st.session_state.debug_log.append(f"✅ Step 1: Replaced {len(mapping)} placeholders → {step1_path}")
 
                     # --- Step 2: Insert EWP image ---
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp2:
@@ -731,11 +741,25 @@ with tab_generate:
 
                     image_stream = BytesIO(ewp_bytes)
                     replace_ewp_image(step1_path, image_stream, step2_path)
+                    st.session_state.debug_log.append(f"✅ Step 2: Inserted EWP image → {step2_path}")
 
-                    # --- Step 3: Embed FIO Excel at {{FIO_REF}} placeholder ---
+                    # Diagnostic on step2 BEFORE embed
+                    diag = check_placeholder_in_docx(step2_path, "{{FIO_REF}}")
+                    st.session_state.debug_log.append("--- Diagnostic on Step 2 output ---")
+                    st.session_state.debug_log.append(f"Exists in raw XML: **{diag['exists_raw']}**")
+                    st.session_state.debug_log.append(f"Exists in concatenated: **{diag['exists_concatenated']}**")
+                    if diag.get("runs_with_ref"):
+                        for run in diag["runs_with_ref"][:10]:
+                            st.session_state.debug_log.append(f"  Run #{run['index']}: `{run['text']}`")
+
+                    # --- Step 3: Embed FIO at {{FIO_REF}} ---
                     final_path = step2_path
 
-                    if st.session_state.get("fio_attachment_bytes") and OLE_EMBED_AVAILABLE:
+                    has_attachment = bool(st.session_state.get("fio_attachment_bytes"))
+                    st.session_state.debug_log.append(f"FIO attachment bytes: **{len(st.session_state.get('fio_attachment_bytes') or b'')}**")
+                    st.session_state.debug_log.append(f"OLE_EMBED_AVAILABLE: **{OLE_EMBED_AVAILABLE}**")
+
+                    if has_attachment and OLE_EMBED_AVAILABLE:
                         try:
                             with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp3:
                                 step3_path = tmp3.name
@@ -748,33 +772,29 @@ with tab_generate:
                                 output_path=step3_path,
                             )
                             final_path = step3_path
+                            st.session_state.debug_log.append(f"✅ Step 3: OLE embed → {step3_path}")
                             st.info("📎 FIO Excel embedded at `{{FIO_REF}}` in Section 13.")
                         except ValueError as ve:
-                            st.warning(
-                                f"⚠️ Could not embed FIO: {ve}. "
-                                "Make sure `{{FIO_REF}}` exists in the template's Section 13."
-                            )
+                            st.session_state.debug_log.append(f"❌ Step 3 ValueError: {ve}")
+                            st.error(f"❌ Embed failed: {ve}")
+                            try:
+                                from utils.ole_embedder import diagnose_placeholder
+                                diag2 = diagnose_placeholder(step2_path, "{{FIO_REF}}")
+                                st.session_state.debug_log.append(f"Diagnostic: {json.dumps(diag2, indent=2)}")
+                            except Exception as de:
+                                st.session_state.debug_log.append(f"Diagnostic failed: {de}")
                         except Exception as embed_err:
-                            st.warning(f"⚠️ Embedding failed: {embed_err}")
+                            st.session_state.debug_log.append(f"❌ Step 3 Exception: {embed_err}")
+                            st.error(f"❌ Embedding failed: {embed_err}")
+                            st.exception(embed_err)
+                    elif not has_attachment:
+                        st.session_state.debug_log.append("⚠️ No FIO attachment — skipped embed")
+                        st.warning("⚠️ No FIO attachment — `{{FIO_REF}}` stays as text.")
+                    elif not OLE_EMBED_AVAILABLE:
+                        st.session_state.debug_log.append("❌ OLE embedder not available")
+                        st.error("❌ OLE embedder not available — check `utils/ole_embedder.py`.")
 
-                    elif st.session_state.get("fio_attachment_bytes") and not OLE_EMBED_AVAILABLE:
-                        # Fallback: replace FIO_REF with text
-                        st.warning(
-                            "⚠️ OLE Embedder unavailable — inserting FIO_REF as text."
-                        )
-                        try:
-                            with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp4:
-                                step3_path = tmp4.name
-                            replace_placeholders(
-                                step2_path,
-                                {"FIO_REF": get_value("FIO_REF", "") or (st.session_state.fio_attachment_name or "FIO.xlsx")},
-                                step3_path,
-                            )
-                            final_path = step3_path
-                        except Exception as fallback_err:
-                            st.warning(f"⚠️ Fallback failed: {fallback_err}")
-
-                    # --- Step 4: Read final output ---
+                    # --- Step 4: Read output ---
                     with open(final_path, "rb") as f:
                         output_bytes = f.read()
 
@@ -785,9 +805,11 @@ with tab_generate:
                         "bytes": output_bytes,
                         "filename": output_filename,
                     }
+                    st.session_state.debug_log.append(f"✅ Final: {output_filename} ({len(output_bytes)} bytes)")
                     st.success("✅ MOP generated successfully!")
 
                 except Exception as e:
+                    st.session_state.debug_log.append(f"❌ Generation failed: {e}")
                     st.error(f"❌ Generation failed: {e}")
                     st.exception(e)
                 finally:
@@ -797,6 +819,13 @@ with tab_generate:
                                 os.unlink(path)
                             except Exception:
                                 pass
+
+        # Display debug log
+        if st.session_state.get("debug_log"):
+            st.markdown("---")
+            st.markdown("### 🔍 Debug — Generation Steps")
+            for line in st.session_state.debug_log:
+                st.markdown(f"- {line}")
 
         if st.session_state.get("generated_file"):
             gen = st.session_state.generated_file
