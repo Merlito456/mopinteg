@@ -39,15 +39,12 @@ def replace_placeholders(docx_path, mapping, output_path):
     """Replace all placeholders in the DOCX file."""
     doc = Document(docx_path)
 
-    # Body paragraphs
     for paragraph in doc.paragraphs:
         _replace_in_paragraph(paragraph, mapping)
 
-    # Tables
     for table in doc.tables:
         _replace_in_table(table, mapping)
 
-    # Headers & footers
     for section in doc.sections:
         for header in [section.header, section.first_page_header, section.even_page_header]:
             if header:
