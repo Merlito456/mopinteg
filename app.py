@@ -24,6 +24,13 @@ except Exception:
     get_ocr_text = None
     extract_candidates = None
 
+try:
+    from utils.ole_embedder import embed_excel_in_docx
+    OLE_EMBED_AVAILABLE = True
+except Exception:
+    OLE_EMBED_AVAILABLE = False
+    embed_excel_in_docx = None
+
 from utils.ai_prompt import GEMINI_PROMPT_TEMPLATE, parse_ai_response
 
 
@@ -55,6 +62,10 @@ if "ewp_ocr_text" not in st.session_state:
     st.session_state.ewp_ocr_text = ""
 if "ewp_candidates" not in st.session_state:
     st.session_state.ewp_candidates = {}
+if "fio_attachment_bytes" not in st.session_state:
+    st.session_state.fio_attachment_bytes = None
+if "fio_attachment_name" not in st.session_state:
+    st.session_state.fio_attachment_name = None
 if "generated_file" not in st.session_state:
     st.session_state.generated_file = None
 if "ai_updated_keys" not in st.session_state:
@@ -79,12 +90,8 @@ def reset_app():
 
 
 def sync_widget_state(widget_key, external_value, default=""):
-    """
-    Sync a widget's state with an external value from placeholder_values.
-    Falls back to `default` if external_value is empty.
-    """
+    """Sync a widget's state with an external value from placeholder_values."""
     effective_value = external_value if external_value else default
-
     last_key = f"_last_{widget_key}"
     last_synced_val = st.session_state.get(last_key, None)
 
@@ -116,13 +123,14 @@ def get_missing_keys():
 st.title("📄 MOP Automation — Nokia Lightspan MF-2 OLT Integration")
 st.markdown(
     """
-    Upload the **FIO Excel** and **EWP Image**, verify the mapped values,
+    Upload the **FIO Excel**, **EWP Image**, and optionally the **FIO Attachment**,
     then generate the filled **MOP Integration Template**.
 
-    **Three ways to fill data:**
-    1. 📊 **Auto-FIO** — extracts values from the FIO Excel
+    **Fill methods:**
+    1. 📊 **Auto-FIO** — parses values from the FIO Excel
     2. 🖼️ **Auto-OCR** — extracts values from the EWP image
-    3. 🤖 **AI Paste** — use Gemini to extract, paste JSON here
+    3. 🤖 **AI Paste** — paste Gemini-extracted JSON
+    4. 📎 **FIO Attachment** — embeds the actual Excel file in Section 13
     """
 )
 
@@ -134,12 +142,34 @@ with st.sidebar:
     st.header("⚙️ Configuration")
 
     st.markdown("### Step 1 — Upload Files")
-    fio_file = st.file_uploader("Upload FIO (.xlsx)", type=["xlsx"], key="fio_uploader")
+    fio_file = st.file_uploader(
+        "Upload FIO (.xlsx)",
+        type=["xlsx"],
+        key="fio_uploader",
+        help="Used to auto-extract values into the MOP.",
+    )
     ewp_image = st.file_uploader(
         "Upload EWP Image (.jpg/.png)",
         type=["jpg", "jpeg", "png"],
         key="ewp_uploader",
+        help="Used for OCR extraction and inserted into Section 9.",
     )
+    fio_attachment = st.file_uploader(
+        "Upload FIO Attachment (.xlsx)",
+        type=["xlsx"],
+        key="fio_attachment_uploader",
+        help="This .xlsx will be EMBEDDED as an OLE object in Section 13.",
+    )
+
+    # Store FIO attachment
+    if fio_attachment:
+        if st.session_state.fio_attachment_bytes is None:
+            st.session_state.fio_attachment_bytes = fio_attachment.read()
+            st.session_state.fio_attachment_name = fio_attachment.name
+            st.success(f"✅ Attachment loaded: {fio_attachment.name}")
+
+    if st.session_state.fio_attachment_bytes:
+        st.caption(f"📎 {st.session_state.fio_attachment_name}")
 
     st.markdown("---")
     st.markdown("### Step 2 — Review & Edit")
@@ -163,11 +193,12 @@ with st.sidebar:
     st.markdown(
         f"- FIO: {'✅ Loaded' if st.session_state.fio_uploaded else '❌ Not uploaded'}\n"
         f"- EWP Image: {'✅ Loaded' if st.session_state.ewp_uploaded else '❌ Not uploaded'}\n"
+        f"- FIO Attachment: {'✅ Loaded' if st.session_state.fio_attachment_bytes else '❌ Not uploaded'}\n"
         f"- Template: {'✅ Found' if os.path.exists(TEMPLATE_PATH) else '❌ Missing'}\n"
-        f"- OCR Engine: {'✅ Available' if EWP_OCR_AVAILABLE else '⚠️ Unavailable'}"
+        f"- OCR Engine: {'✅ Available' if EWP_OCR_AVAILABLE else '⚠️ Unavailable'}\n"
+        f"- OLE Embedder: {'✅ Available' if OLE_EMBED_AVAILABLE else '⚠️ Unavailable'}"
     )
 
-    # Live count of missing fields
     missing_keys = get_missing_keys()
     if missing_keys:
         st.markdown("---")
@@ -312,7 +343,6 @@ with tab_ewp:
 
                 with cols[i % 2]:
                     if candidates and len(candidates) > 1:
-                        # Dropdown mode
                         options = ["(none)"] + candidates
                         try:
                             default_idx = options.index(current) if current in options else 0
@@ -329,13 +359,12 @@ with tab_ewp:
                         )
                         new_val = "" if pick == "(none)" else pick
                     else:
-                        # Text input mode
                         hint = candidates[0] if candidates else ""
 
                         val = st.text_input(
                             display_label,
                             key=widget_key,
-                            help=f"OCR detected: {hint}" if hint else (
+                            help=f"OCR: {hint}" if hint else (
                                 f"Default: {default}" if default else "No OCR match — enter manually"
                             ),
                         )
@@ -356,13 +385,11 @@ with tab_ai:
         "Paste the JSON below — the app will auto-fill all placeholders."
     )
 
-    # Compute missing fields
     missing_keys = get_missing_keys()
 
     st.markdown("### Step 1 — Copy this prompt to Gemini")
 
     if missing_keys:
-        # Build a focused prompt with only missing fields
         focused_prompt = (
             "CRITICAL OUTPUT INSTRUCTIONS:\n"
             "- Return ONLY a valid JSON object\n"
@@ -427,7 +454,6 @@ with tab_ai:
                             set_value(k, v)
                             applied_keys.append(k)
 
-                            # Clear widget cache
                             for prefix in ("fio_", "ewp_", "doc_", "ewp_dd_", "ewp_ti_"):
                                 ck = f"{prefix}{k}"
                                 if ck in st.session_state:
@@ -442,9 +468,7 @@ with tab_ai:
                     st.success(f"✅ Applied {len(applied_keys)} values from AI response")
 
                     if unknown_keys:
-                        st.warning(
-                            f"⚠️ {len(unknown_keys)} keys not recognized — skipped."
-                        )
+                        st.warning(f"⚠️ {len(unknown_keys)} keys not recognized — skipped.")
 
                     with st.expander("📋 Applied values", expanded=False):
                         st.json({k: parsed[k] for k in applied_keys})
@@ -457,12 +481,6 @@ with tab_ai:
 
                 except ValueError as e:
                     st.error(f"❌ Failed to parse AI response: {e}")
-                    st.info(
-                        "💡 **Tip:** Make sure Gemini returned a JSON block like:\n"
-                        "```json\n"
-                        '{\n  "OLT_SITE": "CDO_013_GPONA_02"\n}\n'
-                        "```"
-                    )
                     with st.expander("🔍 Debug — view pasted text", expanded=False):
                         st.code(ai_response[:2000], language="text")
                 except Exception as e:
@@ -485,7 +503,6 @@ with tab_ai:
                 except Exception as e:
                     st.error(f"❌ Unexpected error: {e}")
 
-    # Missing Fields Table
     st.markdown("---")
     st.markdown("### 🎯 Missing Fields")
 
@@ -505,7 +522,6 @@ with tab_ai:
         ]
         st.dataframe(empty_df, use_container_width=True, hide_index=True)
 
-    # Quick actions
     st.markdown("---")
     st.markdown("### 🚀 Quick Actions")
     col_x, col_y = st.columns(2)
@@ -569,6 +585,14 @@ with tab_preview:
         except Exception as e:
             st.error(f"❌ Failed to render: {e}")
 
+    if st.session_state.get("fio_attachment_bytes"):
+        st.markdown("### 📎 FIO Attachment")
+        st.info(
+            f"**{st.session_state.fio_attachment_name}** "
+            f"({len(st.session_state.fio_attachment_bytes) / 1024:.1f} KB) — "
+            "will be embedded as OLE object in Section 13."
+        )
+
     st.markdown("### 📋 Placeholder Values")
     rows = []
     for p in PLACEHOLDER_MAP:
@@ -606,49 +630,97 @@ with tab_generate:
     else:
         st.success("✅ Ready to generate.")
 
+        # Show generation plan
+        st.markdown("#### 📋 Generation Plan")
+        plan = [
+            f"1. Replace **{len(PLACEHOLDER_MAP)}** text placeholders",
+            "2. Insert EWP image into `{{ewp_image}}`",
+        ]
+        if st.session_state.get("fio_attachment_bytes"):
+            plan.append(
+                f"3. Embed **{st.session_state.fio_attachment_name}** as OLE object in Section 13"
+            )
+        else:
+            plan.append("3. ⚠️ No FIO attachment — Section 13 will show text only")
+        st.markdown("\n".join(plan))
+
         # Warn about missing fields
         missing_keys = get_missing_keys()
         if missing_keys:
             st.warning(
-                f"⚠️ {len(missing_keys)} fields still empty — they will remain as "
-                f"`{{{{PLACEHOLDER}}}}` in the generated DOCX. "
-                "You can still generate and fix them later."
+                f"⚠️ **{len(missing_keys)}** fields still empty — they will remain "
+                f"as `{{{{PLACEHOLDER}}}}` in the generated DOCX."
             )
 
         if generate_btn:
             with st.spinner("Generating MOP..."):
                 step1_path = None
                 step2_path = None
+                step3_path = None
                 try:
+                    # --- Step 1: Replace text placeholders ---
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp1:
                         step1_path = tmp1.name
+
                     mapping = {}
                     for p in PLACEHOLDER_MAP:
                         key = p["key"]
                         val = get_value(key, p.get("default", ""))
                         if val:
                             mapping[key] = val
+
                     replace_placeholders(TEMPLATE_PATH, mapping, step1_path)
 
+                    # --- Step 2: Insert EWP image ---
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp2:
                         step2_path = tmp2.name
+
                     image_stream = BytesIO(ewp_bytes)
                     replace_ewp_image(step1_path, image_stream, step2_path)
 
-                    with open(step2_path, "rb") as f:
+                    # --- Step 3: Embed FIO Excel attachment (if uploaded) ---
+                    final_path = step2_path
+
+                    if st.session_state.get("fio_attachment_bytes") and OLE_EMBED_AVAILABLE:
+                        try:
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp3:
+                                step3_path = tmp3.name
+
+                            embed_excel_in_docx(
+                                docx_path=step2_path,
+                                xlsx_bytes=st.session_state.fio_attachment_bytes,
+                                xlsx_filename=st.session_state.fio_attachment_name or "FIO.xlsx",
+                                placeholder="{{FIO_EMBED}}",
+                                output_path=step3_path,
+                            )
+                            final_path = step3_path
+                            st.info("📎 FIO Excel embedded successfully in Section 13.")
+                        except ValueError as ve:
+                            st.warning(
+                                f"⚠️ Could not embed FIO: {ve}. "
+                                "Make sure `{{FIO_EMBED}}` exists in the template's Section 13."
+                            )
+                        except Exception as embed_err:
+                            st.warning(f"⚠️ Embedding failed: {embed_err}")
+
+                    # --- Step 4: Read final output ---
+                    with open(final_path, "rb") as f:
                         output_bytes = f.read()
 
-                    output_filename = f"MOP_INTEGRATION_{get_value('OLT_SITE', 'OUTPUT') or 'OUTPUT'}.docx"
+                    output_filename = (
+                        f"MOP_INTEGRATION_{get_value('OLT_SITE', 'OUTPUT') or 'OUTPUT'}.docx"
+                    )
                     st.session_state.generated_file = {
                         "bytes": output_bytes,
                         "filename": output_filename,
                     }
-                    st.success("✅ MOP generated!")
+                    st.success("✅ MOP generated successfully!")
+
                 except Exception as e:
                     st.error(f"❌ Generation failed: {e}")
                     st.exception(e)
                 finally:
-                    for path in [step1_path, step2_path]:
+                    for path in [step1_path, step2_path, step3_path]:
                         if path and os.path.exists(path):
                             try:
                                 os.unlink(path)
@@ -657,6 +729,8 @@ with tab_generate:
 
         if st.session_state.get("generated_file"):
             gen = st.session_state.generated_file
+            st.markdown("---")
+            st.markdown("### ⬇️ Download")
             st.download_button(
                 label="⬇️ Download Filled MOP (.docx)",
                 data=gen["bytes"],
@@ -665,6 +739,7 @@ with tab_generate:
                 use_container_width=True,
                 key="download_btn",
             )
+            st.caption(f"File: `{gen['filename']}` — {len(gen['bytes']) / 1024:.1f} KB")
 
 
 # ============================================================
