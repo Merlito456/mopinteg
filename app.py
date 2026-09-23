@@ -59,8 +59,6 @@ if "generated_file" not in st.session_state:
     st.session_state.generated_file = None
 if "ai_updated_keys" not in st.session_state:
     st.session_state.ai_updated_keys = set()
-if "force_sync" not in st.session_state:
-    st.session_state.force_sync = False
 
 
 # ============================================================
@@ -80,26 +78,36 @@ def reset_app():
     st.rerun()
 
 
-def sync_widget_state(widget_key, external_value):
+def sync_widget_state(widget_key, external_value, default=""):
     """
     Sync a widget's state with an external value from placeholder_values.
-    Only overwrites the widget if the external value has changed
-    since the last sync (tracked via `_last_{widget_key}`).
+    Falls back to `default` if external_value is empty.
     """
+    effective_value = external_value if external_value else default
+
     last_key = f"_last_{widget_key}"
-    current_widget_val = st.session_state.get(widget_key, None)
     last_synced_val = st.session_state.get(last_key, None)
 
-    # If widget doesn't exist yet → initialize it
     if widget_key not in st.session_state:
-        st.session_state[widget_key] = external_value
-        st.session_state[last_key] = external_value
+        st.session_state[widget_key] = effective_value
+        st.session_state[last_key] = effective_value
         return
 
-    # If external value changed since last sync → push it into widget
-    if last_synced_val != external_value:
-        st.session_state[widget_key] = external_value
-        st.session_state[last_key] = external_value
+    if last_synced_val != effective_value:
+        st.session_state[widget_key] = effective_value
+        st.session_state[last_key] = effective_value
+
+
+def get_missing_keys():
+    """Return list of placeholder keys with no value AND no default."""
+    missing = []
+    for p in PLACEHOLDER_MAP:
+        key = p["key"]
+        val = get_value(key, "")
+        default = p.get("default", "")
+        if not val and not default:
+            missing.append(p)
+    return missing
 
 
 # ============================================================
@@ -159,10 +167,17 @@ with st.sidebar:
         f"- OCR Engine: {'✅ Available' if EWP_OCR_AVAILABLE else '⚠️ Unavailable'}"
     )
 
+    # Live count of missing fields
+    missing_keys = get_missing_keys()
+    if missing_keys:
+        st.markdown("---")
+        st.markdown("### ⚠️ Missing Fields")
+        st.markdown(f"**{len(missing_keys)}** fields still empty")
+
     if st.session_state.ai_updated_keys:
         st.markdown("---")
-        st.markdown("### 🆕 AI-Updated Fields")
-        st.markdown(f"**{len(st.session_state.ai_updated_keys)}** fields updated via AI Paste")
+        st.markdown("### 🆕 AI-Updated")
+        st.markdown(f"**{len(st.session_state.ai_updated_keys)}** fields updated")
 
 
 # ============================================================
@@ -224,7 +239,7 @@ if ewp_image and not st.session_state.ewp_uploaded:
 # ============================================================
 tab_fio, tab_ewp, tab_ai, tab_doc, tab_preview, tab_generate, tab_ocr = st.tabs([
     "📊 FIO-Mapped",
-    "🖼️ EWP-Only (Dropdown)",
+    "🖼️ EWP-Only",
     "🤖 AI Paste",
     "📝 Document Metadata",
     "👁️ Preview",
@@ -250,11 +265,11 @@ with tab_fio:
                 cols = st.columns(2)
                 for i, item in enumerate(items):
                     key, label = item["key"], item["label"]
-                    current = get_value(key)
+                    default = item.get("default", "")
+                    current = get_value(key) or default
                     widget_key = f"fio_{key}"
 
-                    # Sync widget with external updates (AI Paste)
-                    sync_widget_state(widget_key, current)
+                    sync_widget_state(widget_key, current, default)
 
                     display_label = f"🆕 {label}" if key in st.session_state.ai_updated_keys else label
 
@@ -262,7 +277,6 @@ with tab_fio:
                         val = st.text_input(display_label, key=widget_key)
                         if val != current:
                             set_value(key, val)
-                            # Track manual edit as "last synced"
                             st.session_state[f"_last_{widget_key}"] = val
 
 
@@ -273,7 +287,8 @@ with tab_ewp:
     st.subheader("EWP-Only Placeholders")
     st.caption(
         "Values are **auto-extracted via OCR**. Where multiple candidates were found, "
-        "**pick from the dropdown**. AI Paste also populates these fields."
+        "**pick from the dropdown**. AI Paste also populates these fields. "
+        "Defaults are used when OCR misses a value."
     )
 
     if not st.session_state.ewp_uploaded:
@@ -287,11 +302,11 @@ with tab_ewp:
             for i, item in enumerate(items):
                 key, label = item["key"], item["label"]
                 candidates = st.session_state.ewp_candidates.get(key, [])
-                current = get_value(key)
+                default = item.get("default", "")
+                current = get_value(key) or default
                 widget_key = f"ewp_{key}"
 
-                # Sync widget with external updates
-                sync_widget_state(widget_key, current)
+                sync_widget_state(widget_key, current, default)
 
                 display_label = f"🆕 {label}" if key in st.session_state.ai_updated_keys else label
 
@@ -304,7 +319,6 @@ with tab_ewp:
                         except Exception:
                             default_idx = 0
 
-                        # Ensure widget state is one of the options
                         if st.session_state.get(widget_key) not in options:
                             st.session_state[widget_key] = options[default_idx]
 
@@ -321,7 +335,9 @@ with tab_ewp:
                         val = st.text_input(
                             display_label,
                             key=widget_key,
-                            help=f"OCR detected: {hint}" if hint else "No OCR match",
+                            help=f"OCR detected: {hint}" if hint else (
+                                f"Default: {default}" if default else "No OCR match — enter manually"
+                            ),
                         )
                         new_val = val
 
@@ -340,13 +356,53 @@ with tab_ai:
         "Paste the JSON below — the app will auto-fill all placeholders."
     )
 
+    # Compute missing fields
+    missing_keys = get_missing_keys()
+
     st.markdown("### Step 1 — Copy this prompt to Gemini")
-    st.code(GEMINI_PROMPT_TEMPLATE, language="markdown")
+
+    if missing_keys:
+        # Build a focused prompt with only missing fields
+        focused_prompt = (
+            "CRITICAL OUTPUT INSTRUCTIONS:\n"
+            "- Return ONLY a valid JSON object\n"
+            "- Use DOUBLE quotes for all keys and string values\n"
+            "- No markdown fences, no explanation, no trailing commas\n"
+            "- Use null for values you cannot find\n"
+            "- Output MUST start with `{` and end with `}`\n\n"
+            "---\n\n"
+            "You are an expert network engineer reading a Facility Implementation Order (FIO) "
+            "and an Engineering Work Plan (EWP) image for a Nokia Lightspan MF-2 OLT integration.\n\n"
+            "Extract ONLY these fields and return them as a JSON object:\n\n"
+            "{\n"
+            + ",\n".join(f'  "{p["key"]}": ""' for p in missing_keys)
+            + "\n}\n\n"
+            "FIELD DESCRIPTIONS:\n"
+            + "\n".join(f'- {p["key"]}: {p["label"]}' for p in missing_keys)
+        )
+
+        st.info(
+            f"💡 **{len(missing_keys)} fields still empty.** "
+            "The prompt below focuses on those fields only."
+        )
+        st.code(focused_prompt, language="markdown")
+
+        st.markdown("#### 📋 Or copy this JSON template directly")
+        st.code(
+            json.dumps({p["key"]: "" for p in missing_keys}, indent=2),
+            language="json",
+        )
+    else:
+        st.success("✅ All fields already filled! Full prompt shown for reference.")
+        st.code(GEMINI_PROMPT_TEMPLATE, language="markdown")
+
+    with st.expander("🔍 Show full prompt (all fields)", expanded=False):
+        st.code(GEMINI_PROMPT_TEMPLATE, language="markdown")
 
     st.markdown("### Step 2 — Upload FIO + EWP to Gemini, then paste the response below")
 
     ai_response = st.text_area(
-        "Paste Gemini JSON response here (must be a JSON object like `{\"key\": \"value\"}`)",
+        "Paste Gemini JSON response here (must be a JSON object)",
         height=300,
         key="ai_response_textarea",
         placeholder='{"OLT_SITE": "CDO_013_GPONA_02", "OLT_OM_VLAN": "734", ...}',
@@ -362,7 +418,6 @@ with tab_ai:
                 try:
                     parsed = parse_ai_response(ai_response)
 
-                    # Apply each value — only if key is in our placeholder map
                     applied_keys = []
                     unknown_keys = []
                     all_known_keys = {p["key"] for p in PLACEHOLDER_MAP}
@@ -372,7 +427,7 @@ with tab_ai:
                             set_value(k, v)
                             applied_keys.append(k)
 
-                            # Clear widget cache so all tabs re-read the new value
+                            # Clear widget cache
                             for prefix in ("fio_", "ewp_", "doc_", "ewp_dd_", "ewp_ti_"):
                                 ck = f"{prefix}{k}"
                                 if ck in st.session_state:
@@ -383,15 +438,12 @@ with tab_ai:
                         else:
                             unknown_keys.append(k)
 
-                    # Track AI-updated keys for visual highlight
                     st.session_state.ai_updated_keys = set(applied_keys)
-
                     st.success(f"✅ Applied {len(applied_keys)} values from AI response")
 
                     if unknown_keys:
                         st.warning(
-                            f"⚠️ {len(unknown_keys)} keys from AI response were "
-                            f"not recognized and were skipped."
+                            f"⚠️ {len(unknown_keys)} keys not recognized — skipped."
                         )
 
                     with st.expander("📋 Applied values", expanded=False):
@@ -401,7 +453,6 @@ with tab_ai:
                         with st.expander(f"❌ Unknown keys ({len(unknown_keys)})", expanded=False):
                             st.write(unknown_keys)
 
-                    # Force a rerun so all tabs refresh with new values
                     st.rerun()
 
                 except ValueError as e:
@@ -409,10 +460,8 @@ with tab_ai:
                     st.info(
                         "💡 **Tip:** Make sure Gemini returned a JSON block like:\n"
                         "```json\n"
-                        '{\n  "OLT_SITE": "CDO_013_GPONA_02",\n  "OLT_OM_VLAN": "734"\n}\n'
-                        "```\n"
-                        "If it returned plain text, Python code, or a different format, "
-                        "ask Gemini to re-run using the prompt from Step 1."
+                        '{\n  "OLT_SITE": "CDO_013_GPONA_02"\n}\n'
+                        "```"
                     )
                     with st.expander("🔍 Debug — view pasted text", expanded=False):
                         st.code(ai_response[:2000], language="text")
@@ -436,16 +485,45 @@ with tab_ai:
                 except Exception as e:
                     st.error(f"❌ Unexpected error: {e}")
 
-    if st.session_state.ai_updated_keys:
-        if st.button("🧹 Clear AI Highlights", key="clear_ai_highlights"):
+    # Missing Fields Table
+    st.markdown("---")
+    st.markdown("### 🎯 Missing Fields")
+
+    if not missing_keys:
+        st.success("✅ All placeholders are filled!")
+    else:
+        st.warning(f"⚠️ {len(missing_keys)} fields still empty")
+
+        empty_df = [
+            {
+                "Placeholder": f"{{{{{p['key']}}}}}",
+                "Label": p["label"],
+                "Source": p["source"],
+                "Group": p["group"],
+            }
+            for p in missing_keys
+        ]
+        st.dataframe(empty_df, use_container_width=True, hide_index=True)
+
+    # Quick actions
+    st.markdown("---")
+    st.markdown("### 🚀 Quick Actions")
+    col_x, col_y = st.columns(2)
+
+    with col_x:
+        if st.button("🧹 Clear All Fields", use_container_width=True, key="clear_all_btn"):
+            st.session_state.placeholder_values = {}
             st.session_state.ai_updated_keys = set()
+            for k in list(st.session_state.keys()):
+                if k.startswith(("fio_", "ewp_", "doc_", "_last_")):
+                    del st.session_state[k]
+            st.success("✅ Cleared all fields.")
             st.rerun()
 
-    st.markdown("---")
-    st.markdown("### 📋 Full List of Expected Data")
-    st.caption("Ensure Gemini returns ALL these fields:")
-    expected_keys = [p["key"] for p in PLACEHOLDER_MAP if p["source"] in ("FIO", "EWP")]
-    st.code(json.dumps({k: "..." for k in expected_keys}, indent=2), language="json")
+    with col_y:
+        if st.button("🧹 Clear 🆕 Highlights", use_container_width=True, key="clear_ai_highlights"):
+            st.session_state.ai_updated_keys = set()
+            st.rerun()
 
 
 # ============================================================
@@ -463,11 +541,10 @@ with tab_doc:
             for i, item in enumerate(items):
                 key, label = item["key"], item["label"]
                 default = item.get("default", "")
-                current = get_value(key, default)
+                current = get_value(key) or default
                 widget_key = f"doc_{key}"
 
-                # Sync widget with external updates
-                sync_widget_state(widget_key, current)
+                sync_widget_state(widget_key, current, default)
 
                 display_label = f"🆕 {label}" if key in st.session_state.ai_updated_keys else label
 
@@ -528,6 +605,15 @@ with tab_generate:
         st.warning("⚠️ Upload EWP image first.")
     else:
         st.success("✅ Ready to generate.")
+
+        # Warn about missing fields
+        missing_keys = get_missing_keys()
+        if missing_keys:
+            st.warning(
+                f"⚠️ {len(missing_keys)} fields still empty — they will remain as "
+                f"`{{{{PLACEHOLDER}}}}` in the generated DOCX. "
+                "You can still generate and fix them later."
+            )
 
         if generate_btn:
             with st.spinner("Generating MOP..."):
