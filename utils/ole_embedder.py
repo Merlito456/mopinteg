@@ -14,6 +14,8 @@ import re
 import shutil
 import zipfile
 import html
+import time
+import random
 from pathlib import Path
 from io import BytesIO
 
@@ -67,7 +69,6 @@ def _ensure_required_namespaces(doc_xml: str) -> str:
     Ensure document.xml has all namespaces required for OLE embedding.
     Word needs: xmlns:o, xmlns:v, xmlns:w10, xmlns:r, xmlns:w
     """
-    # Find the <w:document ...> opening tag
     doc_tag_match = re.search(r"<w:document\b[^>]*>", doc_xml)
     if not doc_tag_match:
         _log("  [NS] ⚠️ Could not find <w:document> tag")
@@ -78,7 +79,6 @@ def _ensure_required_namespaces(doc_xml: str) -> str:
     added = []
 
     for ns_prefix, ns_uri in REQUIRED_NAMESPACES.items():
-        # Check if namespace is already declared (as xmlns:prefix or xmlns:prefix=)
         if f"{ns_prefix}=" not in doc_tag:
             new_tag = new_tag[:-1] + f' {ns_prefix}="{ns_uri}">'
             added.append(ns_prefix)
@@ -93,6 +93,77 @@ def _ensure_required_namespaces(doc_xml: str) -> str:
 
 
 # ============================================================
+# Unique ID generation — CRITICAL to prevent collisions
+# ============================================================
+def _find_existing_ole_ids(doc_xml: str) -> dict:
+    """
+    Find existing ShapeID, ObjectID, and shape id values in the document.
+    Used to avoid collisions when generating new IDs.
+    """
+    used_shape_ids = set(re.findall(r'ShapeID="([^"]+)"', doc_xml))
+    used_object_ids = set(re.findall(r'ObjectID="([^"]+)"', doc_xml))
+    used_shape_attrs = set(re.findall(r'<v:shape[^>]*\sid="([^"]+)"', doc_xml))
+    used_anchors = set(re.findall(r'w14:anchorId="([^"]+)"', doc_xml))
+
+    return {
+        "shape_ids": used_shape_ids,
+        "object_ids": used_object_ids,
+        "shape_attrs": used_shape_attrs,
+        "anchors": used_anchors,
+    }
+
+
+def _generate_unique_ole_ids(doc_xml: str) -> dict:
+    """
+    Generate unique ShapeID, ObjectID, and anchorId that don't collide
+    with any existing values in the document.
+    """
+    existing = _find_existing_ole_ids(doc_xml)
+
+    # ---- Shape ID (format: _x0000_iXXXX) ----
+    shape_id = None
+    for _ in range(200):
+        candidate = f"_x0000_i{random.randint(1028, 99999)}"
+        if (candidate not in existing["shape_ids"]
+                and candidate not in existing["shape_attrs"]):
+            shape_id = candidate
+            break
+    if shape_id is None:
+        shape_id = f"_x0000_i{int(time.time() * 1000) % 100000}"
+
+    # ---- Object ID (format: _NNNNNNNNNN) ----
+    object_id = None
+    for _ in range(200):
+        candidate = f"_{random.randint(1000000000, 9999999999)}"
+        if candidate not in existing["object_ids"]:
+            object_id = candidate
+            break
+    if object_id is None:
+        object_id = f"_{int(time.time() * 1000000)}"
+
+    # ---- Anchor ID (8-char hex) ----
+    anchor_id = None
+    for _ in range(200):
+        candidate = ''.join(random.choices('0123456789ABCDEF', k=8))
+        if candidate not in existing["anchors"]:
+            anchor_id = candidate
+            break
+    if anchor_id is None:
+        anchor_id = ''.join(random.choices('0123456789ABCDEF', k=8))
+
+    _log(f"  [ID] Existing: {len(existing['shape_ids'])} shapeIDs, "
+         f"{len(existing['object_ids'])} objectIDs, "
+         f"{len(existing['anchors'])} anchors")
+    _log(f"  [ID] New: shape={shape_id}, object={object_id}, anchor={anchor_id}")
+
+    return {
+        "shape_id": shape_id,
+        "object_id": object_id,
+        "anchor_id": anchor_id,
+    }
+
+
+# ============================================================
 # Main Entry Point
 # ============================================================
 def embed_excel_in_docx(
@@ -104,6 +175,19 @@ def embed_excel_in_docx(
 ) -> str:
     """
     Replace a {{FIO_REF}} placeholder in a DOCX with a real OLE-embedded Excel file.
+
+    Args:
+        docx_path: Path to the input .docx
+        xlsx_bytes: Raw bytes of the .xlsx file to embed
+        xlsx_filename: Original filename (used for icon display name)
+        placeholder: The placeholder token to replace (default: {{FIO_REF}})
+        output_path: Where to save the output. If None, uses *_with_attachment.docx
+
+    Returns:
+        Path to the generated .docx
+
+    Raises:
+        ValueError: If placeholder not found OR replacement fails
     """
     docx_path = Path(docx_path)
     if output_path is None:
@@ -204,11 +288,16 @@ def embed_excel_in_docx(
     rels_path.write_text(rels_xml, encoding="utf-8")
     _log(f"  [6] Added rels: rId{next_rid_ole} (OLE), rId{next_rid_icon} (icon)")
 
-    # 7. Build OLE XML
+    # 7. Generate UNIQUE IDs (avoid collision with existing OLE objects)
+    unique_ids = _generate_unique_ole_ids(doc_xml)
+
     ole_xml = _build_ole_xml(
         ole_rid=f"rId{next_rid_ole}",
         icon_rid=f"rId{next_rid_icon}",
         display_name=xlsx_filename,
+        shape_id=unique_ids["shape_id"],
+        object_id=unique_ids["object_id"],
+        anchor_id=unique_ids["anchor_id"],
     )
     _log(f"  [7] OLE XML length: {len(ole_xml)} chars")
 
@@ -221,7 +310,7 @@ def embed_excel_in_docx(
             f"Placeholder '{placeholder}' was found but could not be replaced. "
         )
 
-    # ⭐ 8b. Ensure required namespaces are declared
+    # 8b. Ensure required namespaces are declared
     doc_xml = _ensure_required_namespaces(doc_xml)
 
     doc_xml_path.write_text(doc_xml, encoding="utf-8")
@@ -313,33 +402,34 @@ def _generate_excel_icon_bytes() -> bytes:
 
 
 # ============================================================
-# OLE Object XML Builder — Word-compatible
+# OLE Object XML Builder — Word-compatible + UNIQUE IDs
 # ============================================================
-def _build_ole_xml(ole_rid: str, icon_rid: str, display_name: str) -> str:
+def _build_ole_xml(
+    ole_rid: str,
+    icon_rid: str,
+    display_name: str,
+    shape_id: str,
+    object_id: str,
+    anchor_id: str,
+) -> str:
     """
     Build the OLE object XML matching Word's native embedded object structure.
-
-    Key details from real Word output:
-    - <w:rPr><w:noProof/></w:rPr> comes BEFORE <w:object>
-    - w14:anchorId is present
-    - v:shape has o:ole="" attribute
-    - ShapeID matches v:shape id
-    - o:FieldCodes uses \s (backslash s)
+    Uses UNIQUE IDs to prevent collisions with existing OLE objects in the template.
     """
     safe_name = html.escape(display_name)
 
     ole_xml = (
         '<w:r>'
         '<w:rPr><w:noProof/></w:rPr>'
-        '<w:object w:dxaOrig="1440" w:dyaOrig="1440" w14:anchorId="4C8D24A8">'
-        # ---- Icon shape (matches ShapeID below) ----
-        '<v:shape id="_x0000_i1027" type="#_x0000_t75" '
+        f'<w:object w:dxaOrig="1440" w:dyaOrig="1440" w14:anchorId="{anchor_id}">'
+        # ---- Icon shape (ShapeID matches below) ----
+        f'<v:shape id="{shape_id}" type="#_x0000_t75" '
         'style="width:32pt;height:32pt" o:ole="">'
         f'<v:imagedata r:id="{icon_rid}" o:title="{safe_name}"/>'
         '</v:shape>'
         # ---- OLE object reference ----
         f'<o:OLEObject Type="Embed" ProgID="{OLE_PROG_ID}" '
-        'ShapeID="_x0000_i1027" DrawAspect="Icon" ObjectID="_1625429161" '
+        f'ShapeID="{shape_id}" DrawAspect="Icon" ObjectID="{object_id}" '
         f'r:id="{ole_rid}">'
         '<o:FieldCodes>\\s</o:FieldCodes>'
         '</o:OLEObject>'
@@ -408,6 +498,7 @@ def diagnose_placeholder(docx_path: str, placeholder: str = "{{FIO_REF}}") -> di
         "has_ole_bin": False,
         "has_ole_rel": False,
         "namespaces": {},
+        "ole_ids": {},
     }
 
     temp_dir = docx_path.parent / f"_diag_{docx_path.stem}"
@@ -434,24 +525,29 @@ def diagnose_placeholder(docx_path: str, placeholder: str = "{{FIO_REF}}") -> di
         concatenated = "".join(wt_runs)
         result["exists_concatenated"] = placeholder in concatenated
 
-        # Check OLE presence
         result["has_ole_xml"] = "<o:OLEObject" in doc_xml
 
-        # Check namespaces
         for ns in ["xmlns:o", "xmlns:v", "xmlns:w10", "xmlns:r", "xmlns:w14"]:
             result["namespaces"][ns] = f'{ns}=' in doc_xml
 
-        # Check embeddings
         embeddings = list((temp_dir / "word" / "embeddings").glob("*.bin"))
         result["has_ole_bin"] = len(embeddings) > 0
 
-        # Check rels
         rels_path = temp_dir / "word" / "_rels" / "document.xml.rels"
         if rels_path.exists():
             rels_xml = rels_path.read_text(encoding="utf-8")
             result["has_ole_rel"] = "oleObject" in rels_xml
 
-        # Context
+        # Check OLE ID uniqueness
+        shape_ids = re.findall(r'ShapeID="([^"]+)"', doc_xml)
+        object_ids = re.findall(r'ObjectID="([^"]+)"', doc_xml)
+        result["ole_ids"] = {
+            "shape_ids": shape_ids,
+            "object_ids": object_ids,
+            "shape_ids_unique": len(shape_ids) == len(set(shape_ids)),
+            "object_ids_unique": len(object_ids) == len(set(object_ids)),
+        }
+
         if placeholder in doc_xml:
             idx = doc_xml.find(placeholder)
             result["context"] = doc_xml[max(0, idx - 150):idx + 150]
