@@ -106,10 +106,15 @@ def sync_widget_state(widget_key, external_value, default=""):
 
 
 def get_missing_keys():
-    """Return list of placeholder keys with no value AND no default."""
+    """
+    Return list of placeholder keys with no value AND no default.
+    Excludes FIO_REF because it's handled by the OLE embedder.
+    """
     missing = []
     for p in PLACEHOLDER_MAP:
         key = p["key"]
+        if key == "FIO_REF":
+            continue  # Skip — replaced by OLE embedder
         val = get_value(key, "")
         default = p.get("default", "")
         if not val and not default:
@@ -128,7 +133,7 @@ st.markdown(
 
     The **FIO Excel** is automatically used for both:
     - Parsing values into the MOP
-    - Embedding as an OLE object in Section 13 (Supporting Documents)
+    - Embedding as an OLE object at `{{FIO_REF}}` in Section 13
 
     **Fill methods:**
     1. 📊 **Auto-FIO** — parses values from the FIO Excel
@@ -149,7 +154,7 @@ with st.sidebar:
         "Upload FIO (.xlsx)",
         type=["xlsx"],
         key="fio_uploader",
-        help="Used for both auto-parsing values AND embedding into Section 13.",
+        help="Used for both auto-parsing values AND embedding at {{FIO_REF}}.",
     )
     ewp_image = st.file_uploader(
         "Upload EWP Image (.jpg/.png)",
@@ -179,7 +184,7 @@ with st.sidebar:
 
     # --- Optional override ---
     with st.expander("⚙️ Advanced — Different file for attachment", expanded=False):
-        st.caption("By default, the FIO above is embedded in Section 13.")
+        st.caption("By default, the FIO above is embedded at `{{FIO_REF}}`.")
         override_file = st.file_uploader(
             "Override (.xlsx)",
             type=["xlsx"],
@@ -246,7 +251,7 @@ if fio_file and not st.session_state.fio_uploaded:
             for k, v in parsed.items():
                 set_value(k, v)
 
-            # Ensure FIO_REF is set (used in Section 13 Description column)
+            # Ensure FIO_REF is set (used as the OLE embed anchor)
             if not parsed.get("FIO_REF"):
                 if st.session_state.get("fio_attachment_name"):
                     name = os.path.splitext(st.session_state.fio_attachment_name)[0]
@@ -337,8 +342,14 @@ with tab_fio:
 
                     display_label = f"🆕 {label}" if key in st.session_state.ai_updated_keys else label
 
+                    # Show ℹ️ icon for FIO_REF (it's replaced by OLE embedder)
+                    help_text = None
+                    if key == "FIO_REF":
+                        help_text = "This value is used as the anchor for the OLE-embedded Excel file."
+                        display_label = f"📎 {label} (OLE anchor)"
+
                     with cols[i % 2]:
-                        val = st.text_input(display_label, key=widget_key)
+                        val = st.text_input(display_label, key=widget_key, help=help_text)
                         if val != current:
                             set_value(key, val)
                             st.session_state[f"_last_{widget_key}"] = val
@@ -620,11 +631,11 @@ with tab_preview:
             st.error(f"❌ Failed to render: {e}")
 
     if st.session_state.get("fio_attachment_bytes"):
-        st.markdown("### 📎 FIO Attachment")
+        st.markdown("### 📎 FIO Attachment (OLE Embed at `{{FIO_REF}}`)")
         st.info(
             f"**{st.session_state.fio_attachment_name}** "
             f"({len(st.session_state.fio_attachment_bytes) / 1024:.1f} KB) — "
-            "will be embedded as OLE object in Section 13."
+            "will be embedded as an OLE object at the `{{FIO_REF}}` placeholder."
         )
 
     st.markdown("### 📋 Placeholder Values")
@@ -633,6 +644,8 @@ with tab_preview:
         key = p["key"]
         val = get_value(key, p.get("default", ""))
         marker = "🆕" if key in st.session_state.ai_updated_keys else ""
+        if key == "FIO_REF":
+            marker = "📎"
         rows.append({
             "": marker,
             "Group": p["group"],
@@ -666,18 +679,20 @@ with tab_generate:
 
         # Show generation plan
         st.markdown("#### 📋 Generation Plan")
+        # Count placeholders excluding FIO_REF
+        placeholder_count = len([p for p in PLACEHOLDER_MAP if p["key"] != "FIO_REF"])
         plan = [
-            f"1. Replace **{len(PLACEHOLDER_MAP)}** text placeholders",
+            f"1. Replace **{placeholder_count}** text placeholders (excludes `{{{{FIO_REF}}}}`)",
             "2. Insert EWP image into `{{ewp_image}}`",
         ]
         if st.session_state.get("fio_attachment_bytes") and OLE_EMBED_AVAILABLE:
             plan.append(
-                f"3. Embed **{st.session_state.fio_attachment_name}** as OLE object in Section 13"
+                f"3. Embed **{st.session_state.fio_attachment_name}** as OLE object at `{{{{FIO_REF}}}}`"
             )
         elif st.session_state.get("fio_attachment_bytes"):
-            plan.append("3. ⚠️ OLE Embedder unavailable — FIO will not be embedded")
+            plan.append("3. ⚠️ OLE Embedder unavailable — falling back to text")
         else:
-            plan.append("3. ⚠️ No FIO attachment — Section 13 will show text only")
+            plan.append("3. ⚠️ No FIO attachment — `{{FIO_REF}}` will stay as text")
         st.markdown("\n".join(plan))
 
         # Warn about missing fields
@@ -694,13 +709,16 @@ with tab_generate:
                 step2_path = None
                 step3_path = None
                 try:
-                    # --- Step 1: Replace text placeholders ---
+                    # --- Step 1: Replace text placeholders (EXCEPT FIO_REF) ---
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp1:
                         step1_path = tmp1.name
 
                     mapping = {}
                     for p in PLACEHOLDER_MAP:
                         key = p["key"]
+                        # Skip FIO_REF — it's replaced by OLE embedder in Step 3
+                        if key == "FIO_REF":
+                            continue
                         val = get_value(key, p.get("default", ""))
                         if val:
                             mapping[key] = val
@@ -714,7 +732,7 @@ with tab_generate:
                     image_stream = BytesIO(ewp_bytes)
                     replace_ewp_image(step1_path, image_stream, step2_path)
 
-                    # --- Step 3: Embed FIO Excel attachment (if available) ---
+                    # --- Step 3: Embed FIO Excel at {{FIO_REF}} placeholder ---
                     final_path = step2_path
 
                     if st.session_state.get("fio_attachment_bytes") and OLE_EMBED_AVAILABLE:
@@ -726,18 +744,35 @@ with tab_generate:
                                 docx_path=step2_path,
                                 xlsx_bytes=st.session_state.fio_attachment_bytes,
                                 xlsx_filename=st.session_state.fio_attachment_name or "FIO.xlsx",
-                                placeholder="{{FIO_EMBED}}",
+                                placeholder="{{FIO_REF}}",
                                 output_path=step3_path,
                             )
                             final_path = step3_path
-                            st.info("📎 FIO Excel embedded successfully in Section 13.")
+                            st.info("📎 FIO Excel embedded at `{{FIO_REF}}` in Section 13.")
                         except ValueError as ve:
                             st.warning(
                                 f"⚠️ Could not embed FIO: {ve}. "
-                                "Make sure `{{FIO_EMBED}}` exists in the template's Section 13."
+                                "Make sure `{{FIO_REF}}` exists in the template's Section 13."
                             )
                         except Exception as embed_err:
                             st.warning(f"⚠️ Embedding failed: {embed_err}")
+
+                    elif st.session_state.get("fio_attachment_bytes") and not OLE_EMBED_AVAILABLE:
+                        # Fallback: replace FIO_REF with text
+                        st.warning(
+                            "⚠️ OLE Embedder unavailable — inserting FIO_REF as text."
+                        )
+                        try:
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp4:
+                                step3_path = tmp4.name
+                            replace_placeholders(
+                                step2_path,
+                                {"FIO_REF": get_value("FIO_REF", "") or (st.session_state.fio_attachment_name or "FIO.xlsx")},
+                                step3_path,
+                            )
+                            final_path = step3_path
+                        except Exception as fallback_err:
+                            st.warning(f"⚠️ Fallback failed: {fallback_err}")
 
                     # --- Step 4: Read final output ---
                     with open(final_path, "rb") as f:
