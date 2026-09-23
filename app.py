@@ -13,7 +13,9 @@ from utils.fio_parser import parse_fio
 from utils.docx_replacer import replace_placeholders
 from utils.image_replacer import replace_ewp_image
 
-# ---------------- CONFIG ----------------
+# ============================================================
+# CONFIG
+# ============================================================
 st.set_page_config(
     page_title="MOP Automation",
     page_icon="📄",
@@ -23,7 +25,10 @@ st.set_page_config(
 
 TEMPLATE_PATH = "template/MOP_INTEGRATION_TEMPLATE.docx"
 
-# ---------------- SESSION STATE ----------------
+
+# ============================================================
+# SESSION STATE
+# ============================================================
 if "placeholder_values" not in st.session_state:
     st.session_state.placeholder_values = {}
 
@@ -36,8 +41,13 @@ if "ewp_uploaded" not in st.session_state:
 if "ewp_image_bytes" not in st.session_state:
     st.session_state.ewp_image_bytes = None
 
+if "generated_file" not in st.session_state:
+    st.session_state.generated_file = None
 
-# ---------------- HELPERS ----------------
+
+# ============================================================
+# HELPERS
+# ============================================================
 def set_value(key, value):
     st.session_state.placeholder_values[key] = value
 
@@ -46,7 +56,16 @@ def get_value(key, default=""):
     return st.session_state.placeholder_values.get(key, default)
 
 
-# ---------------- HEADER ----------------
+def reset_app():
+    """Reset all session state."""
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.rerun()
+
+
+# ============================================================
+# HEADER
+# ============================================================
 st.title("📄 MOP Automation — Nokia Lightspan MF-2 OLT Integration")
 st.markdown(
     """
@@ -55,23 +74,58 @@ st.markdown(
     """
 )
 
-# ---------------- SIDEBAR ----------------
+
+# ============================================================
+# SIDEBAR
+# ============================================================
 with st.sidebar:
     st.header("⚙️ Configuration")
+
     st.markdown("### Step 1 — Upload Files")
-    fio_file = st.file_uploader("Upload FIO (.xlsx)", type=["xlsx"])
-    ewp_image = st.file_uploader("Upload EWP Image (.jpg/.png)", type=["jpg", "jpeg", "png"])
+    fio_file = st.file_uploader(
+        "Upload FIO (.xlsx)",
+        type=["xlsx"],
+        key="fio_uploader",
+    )
+    ewp_image = st.file_uploader(
+        "Upload EWP Image (.jpg/.png)",
+        type=["jpg", "jpeg", "png"],
+        key="ewp_uploader",
+    )
+
     st.markdown("---")
     st.markdown("### Step 2 — Review & Edit")
     st.markdown(
         "FIO-derived values are **auto-filled** and editable.\n\n"
         "EWP-only values require **manual input**."
     )
+
     st.markdown("---")
     st.markdown("### Step 3 — Generate MOP")
-    generate_btn = st.button("🚀 Generate MOP", use_container_width=True, type="primary")
+    generate_btn = st.button(
+        "🚀 Generate MOP",
+        use_container_width=True,
+        type="primary",
+        key="generate_btn",
+    )
 
-# ---------------- PARSE FIO ----------------
+    st.markdown("---")
+    if st.button("🔄 Reset App", use_container_width=True, key="reset_btn"):
+        reset_app()
+
+    # Status indicators
+    st.markdown("---")
+    st.markdown("### 📌 Status")
+    st.markdown(
+        f"- FIO: {'✅ Loaded' if st.session_state.fio_uploaded else '❌ Not uploaded'}\n"
+        f"- EWP Image: {'✅ Loaded' if st.session_state.ewp_uploaded else '❌ Not uploaded'}\n"
+        f"- Template: {'✅ Found' if os.path.exists(TEMPLATE_PATH) else '❌ Missing'}"
+    )
+
+
+# ============================================================
+# PARSE FIO
+# ============================================================
 if fio_file and not st.session_state.fio_uploaded:
     with st.spinner("Parsing FIO..."):
         try:
@@ -82,25 +136,43 @@ if fio_file and not st.session_state.fio_uploaded:
             st.success(f"✅ FIO parsed — {len(parsed)} values mapped")
         except Exception as e:
             st.error(f"❌ Failed to parse FIO: {e}")
+            st.exception(e)
 
-# ---------------- STORE EWP IMAGE ----------------
+
+# ============================================================
+# STORE EWP IMAGE
+# ============================================================
 if ewp_image and not st.session_state.ewp_uploaded:
-    st.session_state.ewp_image_bytes = ewp_image.read()
-    st.session_state.ewp_uploaded = True
-    st.success("✅ EWP image loaded")
+    try:
+        st.session_state.ewp_image_bytes = ewp_image.read()
+        st.session_state.ewp_uploaded = True
+        st.success("✅ EWP image loaded")
+    except Exception as e:
+        st.error(f"❌ Failed to load EWP image: {e}")
+        st.exception(e)
 
-# ---------------- TABS ----------------
+
+# ============================================================
+# TABS
+# ============================================================
 tab_fio, tab_ewp, tab_doc, tab_preview, tab_generate = st.tabs([
-    "📊 FIO-Mapped (Auto)", "🖼️ EWP-Only (Manual)", "📝 Document Metadata", "👁️ Preview", "📄 Generate"
+    "📊 FIO-Mapped (Auto)",
+    "🖼️ EWP-Only (Manual)",
+    "📝 Document Metadata",
+    "👁️ Preview",
+    "📄 Generate",
 ])
 
-# ================= TAB 1: FIO-MAPPED =================
+
+# ============================================================
+# TAB 1: FIO-MAPPED
+# ============================================================
 with tab_fio:
     st.subheader("FIO-Mapped Placeholders")
     st.caption("These values were extracted from the FIO. You may edit them below.")
 
     if not st.session_state.fio_uploaded:
-        st.warning("⚠️ Upload the FIO Excel file first.")
+        st.warning("⚠️ Upload the FIO Excel file first in the sidebar.")
     else:
         groups = sorted(set(p["group"] for p in PLACEHOLDER_MAP if p["source"] == "FIO"))
         for group in groups:
@@ -119,12 +191,15 @@ with tab_fio:
                         if val != get_value(key):
                             set_value(key, val)
 
-# ================= TAB 2: EWP-ONLY =================
+
+# ============================================================
+# TAB 2: EWP-ONLY
+# ============================================================
 with tab_ewp:
     st.subheader("EWP-Only Placeholders (Manual Input)")
     st.caption(
-        "These values cannot be extracted from the FIO — they must be read from the EWP image "
-        "and entered manually."
+        "These values cannot be extracted from the FIO — they must be read from "
+        "the EWP image and entered manually."
     )
 
     if not st.session_state.ewp_uploaded:
@@ -147,7 +222,10 @@ with tab_ewp:
                     if val != get_value(key):
                         set_value(key, val)
 
-# ================= TAB 3: DOCUMENT METADATA =================
+
+# ============================================================
+# TAB 3: DOCUMENT METADATA
+# ============================================================
 with tab_doc:
     st.subheader("Document Metadata & Fixed Values")
     st.caption("These have sensible defaults but can be edited.")
@@ -170,15 +248,26 @@ with tab_doc:
                     if val != get_value(key, default):
                         set_value(key, val)
 
-# ================= TAB 4: PREVIEW =================
+
+# ============================================================
+# TAB 4: PREVIEW
+# ============================================================
 with tab_preview:
     st.subheader("Preview — All Placeholder Values")
     st.caption("This is what will be substituted into the template.")
 
-    if st.session_state.ewp_image_bytes:
+    # --- EWP Image (SAFE rendering) ---
+    ewp_bytes = st.session_state.get("ewp_image_bytes")
+    if ewp_bytes:
         st.markdown("### 🖼️ EWP Image")
-        st.image(st.session_state.ewp_image_bytes, use_column_width=True)
+        try:
+            st.image(ewp_bytes, use_container_width=True)
+        except Exception as e:
+            st.error(f"❌ Failed to render EWP image: {e}")
+    else:
+        st.info("ℹ️ No EWP image uploaded yet. Upload one in the sidebar.")
 
+    # --- Placeholder table ---
     st.markdown("### 📋 Placeholder Values")
 
     rows = []
@@ -194,60 +283,105 @@ with tab_preview:
 
     st.dataframe(rows, use_container_width=True, hide_index=True)
 
-# ================= TAB 5: GENERATE =================
+    # --- Summary metrics ---
+    st.markdown("### 📈 Summary")
+    total = len(PLACEHOLDER_MAP)
+    filled = sum(1 for p in PLACEHOLDER_MAP if get_value(p["key"], p.get("default", "")))
+    empty = total - filled
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Placeholders", total)
+    col2.metric("Filled", filled)
+    col3.metric("Empty", empty)
+
+
+# ============================================================
+# TAB 5: GENERATE
+# ============================================================
 with tab_generate:
     st.subheader("Generate Filled MOP")
 
+    ewp_bytes = st.session_state.get("ewp_image_bytes")
+
     if not os.path.exists(TEMPLATE_PATH):
-        st.error(f"❌ Template not found at `{TEMPLATE_PATH}`. Please add it to the repo.")
-    elif not st.session_state.ewp_image_bytes:
-        st.warning("⚠️ Please upload the EWP image first.")
+        st.error(
+            f"❌ Template not found at `{TEMPLATE_PATH}`. "
+            "Please add `MOP_INTEGRATION_TEMPLATE.docx` to the `template/` folder."
+        )
+    elif not ewp_bytes:
+        st.warning("⚠️ Please upload the EWP image first in the sidebar.")
     else:
         st.success("✅ Template found. Ready to generate.")
 
         if generate_btn:
             with st.spinner("Generating MOP..."):
-                # Step 1: Replace text placeholders
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp1:
-                    step1_path = tmp1.name
+                step1_path = None
+                step2_path = None
+                try:
+                    # --- Step 1: Text placeholder replacement ---
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp1:
+                        step1_path = tmp1.name
 
-                mapping = {}
-                for p in PLACEHOLDER_MAP:
-                    key = p["key"]
-                    val = get_value(key, p.get("default", ""))
-                    if val:
-                        mapping[key] = val
+                    mapping = {}
+                    for p in PLACEHOLDER_MAP:
+                        key = p["key"]
+                        val = get_value(key, p.get("default", ""))
+                        if val:
+                            mapping[key] = val
 
-                replace_placeholders(TEMPLATE_PATH, mapping, step1_path)
+                    replace_placeholders(TEMPLATE_PATH, mapping, step1_path)
 
-                # Step 2: Replace EWP image
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp2:
-                    step2_path = tmp2.name
+                    # --- Step 2: EWP image insertion ---
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp2:
+                        step2_path = tmp2.name
 
-                with open(step1_path, "rb") as f:
-                    image_stream = BytesIO(st.session_state.ewp_image_bytes)
+                    image_stream = BytesIO(ewp_bytes)
+                    replace_ewp_image(step1_path, image_stream, step2_path)
 
-                replace_ewp_image(step1_path, image_stream, step2_path)
+                    # --- Step 3: Read output ---
+                    with open(step2_path, "rb") as f:
+                        output_bytes = f.read()
 
-                # Step 3: Provide download
-                with open(step2_path, "rb") as f:
-                    output_bytes = f.read()
+                    output_filename = (
+                        f"MOP_INTEGRATION_"
+                        f"{get_value('OLT_SITE', 'OUTPUT') or 'OUTPUT'}.docx"
+                    )
 
-                output_filename = f"MOP_INTEGRATION_{get_value('OLT_SITE', 'OUTPUT')}.docx"
+                    st.session_state.generated_file = {
+                        "bytes": output_bytes,
+                        "filename": output_filename,
+                    }
 
-                st.success("✅ MOP generated successfully!")
-                st.download_button(
-                    label="⬇️ Download Filled MOP (.docx)",
-                    data=output_bytes,
-                    file_name=output_filename,
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    use_container_width=True,
-                )
+                    st.success("✅ MOP generated successfully!")
 
-                # Cleanup
-                os.unlink(step1_path)
-                os.unlink(step2_path)
+                except Exception as e:
+                    st.error(f"❌ Generation failed: {e}")
+                    st.exception(e)
 
-# ---------------- FOOTER ----------------
+                finally:
+                    # Cleanup temp files
+                    for path in [step1_path, step2_path]:
+                        if path and os.path.exists(path):
+                            try:
+                                os.unlink(path)
+                            except Exception:
+                                pass
+
+        # --- Download button (persists across reruns) ---
+        if st.session_state.get("generated_file"):
+            gen = st.session_state.generated_file
+            st.download_button(
+                label="⬇️ Download Filled MOP (.docx)",
+                data=gen["bytes"],
+                file_name=gen["filename"],
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+                key="download_btn",
+            )
+
+
+# ============================================================
+# FOOTER
+# ============================================================
 st.markdown("---")
 st.caption("MOP Automation • Nokia Lightspan MF-2 OLT Integration • Globe Telecom")
