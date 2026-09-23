@@ -25,7 +25,6 @@ except Exception:
     get_ocr_text = None
     extract_candidates = None
 
-# Try Package approach first, fall back to legacy OLE
 try:
     from utils.ole_embedder import (
         embed_excel_as_package,
@@ -67,7 +66,7 @@ TEMPLATE_PATH = "template/MOP_INTEGRATION_TEMPLATE.docx"
 # SESSION STATE
 # ============================================================
 SESSION_DEFAULTS = {
-    "placeholder_values": {},
+    "placeholder_values": {"SITE_NAME": "LCGCDO"},
     "fio_uploaded": False,
     "ewp_uploaded": False,
     "ewp_image_bytes": None,
@@ -85,6 +84,10 @@ SESSION_DEFAULTS = {
 for key, default in SESSION_DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = default
+
+# Ensure SITE_NAME has a value even if placeholder_values existed already
+if not st.session_state.placeholder_values.get("SITE_NAME"):
+    st.session_state.placeholder_values["SITE_NAME"] = "LCGCDO"
 
 
 PROTECTED_SESSION_KEYS = set(SESSION_DEFAULTS.keys())
@@ -194,6 +197,45 @@ def check_placeholder_in_docx(docx_path, placeholder):
         result["error"] = str(e)
 
     return result
+
+
+def build_output_filename():
+    """
+    Build the output filename:
+      MOP_{SITE_NAME}_{OLT_SITE}_{OLT_PRODUCT}_Mini_OLT_Integration_{DATE_PRIMARY}_v{VERSION}.docx
+
+    Example:
+      MOP_LCGCDO_CDO_013_GPONA_02_MF-2_Mini_OLT_Integration_July 31_v1.1.docx
+    """
+    site_name = get_value("SITE_NAME") or "SITE_NAME"
+    olt_site = get_value("OLT_SITE") or "OLT_SITE"
+    olt_product = get_value("OLT_PRODUCT") or "MF-2"
+    date_primary = get_value("DATE_PRIMARY") or "TBD"
+    version = get_value("VERSION") or "1.0"
+
+    def sanitize(s):
+        s = str(s)
+        for ch in ['<', '>', ':', '"', '/', '\\', '|', '?', '*']:
+            s = s.replace(ch, "-")
+        s = re.sub(r"\s+", " ", s)
+        return s.strip()
+
+    # Strip ", YYYY" from date for a shorter filename
+    date_short = re.sub(r",\s*\d{4}$", "", date_primary)
+
+    parts = [
+        "MOP",
+        sanitize(site_name),
+        sanitize(olt_site),
+        sanitize(olt_product),
+        "Mini",
+        "OLT",
+        "Integration",
+        sanitize(date_short),
+        f"v{sanitize(version)}",
+    ]
+
+    return "_".join(parts) + ".docx"
 
 
 # ============================================================
@@ -667,7 +709,7 @@ with tab_ai:
 
     with col_x:
         if st.button("🧹 Clear All Fields", use_container_width=True, key="clear_all_btn"):
-            st.session_state.placeholder_values = {}
+            st.session_state.placeholder_values = {"SITE_NAME": "LCGCDO"}
             st.session_state.ai_updated_keys = set()
             clear_widget_caches()
             st.success("✅ Cleared all fields.")
@@ -712,6 +754,10 @@ with tab_doc:
 # ============================================================
 with tab_preview:
     st.subheader("Preview — All Placeholder Values")
+
+    # ⭐ Output filename preview
+    st.markdown("### 📄 Output Filename Preview")
+    st.code(build_output_filename(), language="text")
 
     ewp_bytes = st.session_state.get("ewp_image_bytes")
     if ewp_bytes:
@@ -767,6 +813,10 @@ with tab_generate:
         st.warning("⚠️ Upload EWP image first.")
     else:
         st.success("✅ Ready to generate.")
+
+        # ⭐ Output filename preview
+        st.markdown("#### 📄 Output Filename")
+        st.code(build_output_filename(), language="text")
 
         st.markdown("#### 📋 Generation Plan")
         placeholder_count = len([p for p in PLACEHOLDER_MAP if p["key"] != "FIO_REF"])
@@ -851,17 +901,13 @@ with tab_generate:
                         if val:
                             mapping[key] = val
 
+                    # Ensure SITE_NAME is in the mapping
+                    if "SITE_NAME" not in mapping:
+                        mapping["SITE_NAME"] = get_value("SITE_NAME") or "LCGCDO"
+
                     st.session_state.debug_log.append(
                         f"Mapping keys: **{len(mapping)}**"
                     )
-                    if "OLT_UPLINK_PORT" in mapping:
-                        st.session_state.debug_log.append(
-                            f"✅ `OLT_UPLINK_PORT` = `{mapping['OLT_UPLINK_PORT']}`"
-                        )
-                    else:
-                        st.session_state.debug_log.append(
-                            "❌ `OLT_UPLINK_PORT` NOT in mapping!"
-                        )
 
                     replace_placeholders(TEMPLATE_PATH, mapping, step1_path)
                     st.session_state.debug_log.append(
@@ -955,9 +1001,9 @@ with tab_generate:
                     with open(final_path, "rb") as f:
                         output_bytes = f.read()
 
-                    output_filename = (
-                        f"MOP_INTEGRATION_{get_value('OLT_SITE', 'OUTPUT') or 'OUTPUT'}.docx"
-                    )
+                    # ⭐ USE CUSTOM FILENAME
+                    output_filename = build_output_filename()
+
                     st.session_state.generated_file = {
                         "bytes": output_bytes,
                         "filename": output_filename,
@@ -965,7 +1011,7 @@ with tab_generate:
                     st.session_state.debug_log.append(
                         f"✅ Final: {output_filename} ({len(output_bytes)} bytes)"
                     )
-                    st.success("✅ MOP generated successfully!")
+                    st.success(f"✅ MOP generated: `{output_filename}`")
 
                 except Exception as e:
                     st.session_state.debug_log.append(f"❌ Generation failed: {e}")
@@ -1094,7 +1140,7 @@ with tab_ocr:
 
 
 # ============================================================
-# TAB 8: ABOUT (SIMPLIFIED — NO CSS)
+# TAB 8: ABOUT
 # ============================================================
 with tab_about:
     st.title("ℹ️ About MOP Automation")
