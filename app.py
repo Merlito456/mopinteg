@@ -25,13 +25,27 @@ except Exception:
     get_ocr_text = None
     extract_candidates = None
 
+# ⭐ Try Package approach first, fall back to legacy OLE
 try:
-    from utils.ole_embedder import embed_excel_in_docx, diagnose_placeholder
+    from utils.ole_embedder import (
+        embed_excel_as_package,
+        embed_excel_in_docx,
+        diagnose_placeholder,
+    )
     OLE_EMBED_AVAILABLE = True
-except Exception:
-    OLE_EMBED_AVAILABLE = False
-    embed_excel_in_docx = None
-    diagnose_placeholder = None
+    PACKAGE_EMBED_AVAILABLE = True
+except ImportError:
+    try:
+        from utils.ole_embedder import embed_excel_in_docx, diagnose_placeholder
+        OLE_EMBED_AVAILABLE = True
+        PACKAGE_EMBED_AVAILABLE = False
+        embed_excel_as_package = None
+    except Exception:
+        OLE_EMBED_AVAILABLE = False
+        PACKAGE_EMBED_AVAILABLE = False
+        embed_excel_in_docx = None
+        embed_excel_as_package = None
+        diagnose_placeholder = None
 
 from utils.ai_prompt import GEMINI_PROMPT_TEMPLATE, parse_ai_response
 
@@ -74,6 +88,8 @@ if "ai_updated_keys" not in st.session_state:
     st.session_state.ai_updated_keys = set()
 if "debug_log" not in st.session_state:
     st.session_state.debug_log = []
+if "ole_debug_log" not in st.session_state:
+    st.session_state.ole_debug_log = []
 
 
 # ============================================================
@@ -139,7 +155,6 @@ def check_placeholder_in_docx(docx_path, placeholder):
         concatenated = "".join(wt_runs)
         result["exists_concatenated"] = placeholder in concatenated
 
-        # Find near matches
         for term in ["FIO", "REF", "{FIO", "FIO_REF", "{{FIO"]:
             idx = concatenated.find(term)
             if idx >= 0:
@@ -149,7 +164,6 @@ def check_placeholder_in_docx(docx_path, placeholder):
                     "snippet": snippet,
                 })
 
-        # Find runs with "REF" or "FIO"
         for i, run in enumerate(wt_runs):
             if "FIO" in run or "REF" in run or "{" in run:
                 result["runs_with_ref"].append({
@@ -171,9 +185,8 @@ st.markdown(
     Upload the **FIO Excel** and **EWP Image**, verify the mapped values,
     then generate the filled **MOP Integration Template**.
 
-    The **FIO Excel** is automatically used for both:
-    - Parsing values into the MOP
-    - Embedding as an OLE object at `{{FIO_REF}}` in Section 13
+    The **FIO Excel** is embedded as a Package (Word 2016+ native format)
+    at `{{FIO_REF}}` in Section 13. Double-click the icon to open it in Excel.
 
     **Fill methods:**
     1. 📊 **Auto-FIO** — parses values from the FIO Excel
@@ -260,7 +273,8 @@ with st.sidebar:
         f"- FIO Attachment: {'✅ Ready' if st.session_state.fio_attachment_bytes else '❌ None'}\n"
         f"- Template: {'✅ Found' if os.path.exists(TEMPLATE_PATH) else '❌ Missing'}\n"
         f"- OCR Engine: {'✅ Available' if EWP_OCR_AVAILABLE else '⚠️ Unavailable'}\n"
-        f"- OLE Embedder: {'✅ Available' if OLE_EMBED_AVAILABLE else '⚠️ Unavailable'}"
+        f"- Package Embed: {'✅ Available' if PACKAGE_EMBED_AVAILABLE else '⚠️ Unavailable'}\n"
+        f"- OLE Embed: {'✅ Available' if OLE_EMBED_AVAILABLE else '⚠️ Unavailable'}"
     )
 
     missing_keys = get_missing_keys()
@@ -377,8 +391,8 @@ with tab_fio:
 
                     help_text = None
                     if key == "FIO_REF":
-                        help_text = "This value is used as the anchor for the OLE-embedded Excel file."
-                        display_label = f"📎 {label} (OLE anchor)"
+                        help_text = "This value is used as the anchor for the embedded Excel file."
+                        display_label = f"📎 {label} (embed anchor)"
 
                     with cols[i % 2]:
                         val = st.text_input(display_label, key=widget_key, help=help_text)
@@ -640,11 +654,11 @@ with tab_preview:
             st.error(f"❌ Failed to render: {e}")
 
     if st.session_state.get("fio_attachment_bytes"):
-        st.markdown("### 📎 FIO Attachment (OLE Embed at `{{FIO_REF}}`)")
+        st.markdown("### 📎 FIO Attachment (Embed at `{{FIO_REF}}`)")
         st.info(
             f"**{st.session_state.fio_attachment_name}** "
             f"({len(st.session_state.fio_attachment_bytes) / 1024:.1f} KB) — "
-            "will be embedded as an OLE object at the `{{FIO_REF}}` placeholder."
+            "will be embedded as a Package object at the `{{FIO_REF}}` placeholder."
         )
 
     st.markdown("### 📋 Placeholder Values")
@@ -693,10 +707,16 @@ with tab_generate:
             f"1. Replace **{placeholder_count}** text placeholders (excludes `{{{{FIO_REF}}}}`)",
             "2. Insert EWP image into `{{ewp_image}}`",
         ]
-        if st.session_state.get("fio_attachment_bytes") and OLE_EMBED_AVAILABLE:
-            plan.append(f"3. Embed **{st.session_state.fio_attachment_name}** as OLE at `{{{{FIO_REF}}}}`")
+        if st.session_state.get("fio_attachment_bytes") and PACKAGE_EMBED_AVAILABLE:
+            plan.append(
+                f"3. Embed **{st.session_state.fio_attachment_name}** as Package at `{{{{FIO_REF}}}}`"
+            )
+        elif st.session_state.get("fio_attachment_bytes") and OLE_EMBED_AVAILABLE:
+            plan.append(
+                f"3. Embed **{st.session_state.fio_attachment_name}** as OLE (fallback)"
+            )
         elif st.session_state.get("fio_attachment_bytes"):
-            plan.append("3. ⚠️ OLE Embedder unavailable")
+            plan.append("3. ⚠️ No embedder available")
         else:
             plan.append("3. ⚠️ No FIO attachment")
         st.markdown("\n".join(plan))
@@ -712,8 +732,24 @@ with tab_generate:
         if missing_keys:
             st.warning(f"⚠️ **{len(missing_keys)}** fields still empty.")
 
+        # Embedding method selector
+        embed_method = "package"  # default
+        if PACKAGE_EMBED_AVAILABLE and OLE_EMBED_AVAILABLE:
+            with st.expander("⚙️ Embedding Method", expanded=False):
+                embed_method = st.radio(
+                    "Choose embedding method:",
+                    options=["package", "ole"],
+                    format_func=lambda x: {
+                        "package": "📦 Package (Word 2016+ recommended)",
+                        "ole": "🔗 Legacy OLE (older Word)",
+                    }[x],
+                    horizontal=True,
+                    key="embed_method_radio",
+                )
+
         if generate_btn:
             st.session_state.debug_log = []
+            st.session_state.ole_debug_log = []
             with st.spinner("Generating MOP..."):
                 step1_path = None
                 step2_path = None
@@ -733,7 +769,9 @@ with tab_generate:
                             mapping[key] = val
 
                     replace_placeholders(TEMPLATE_PATH, mapping, step1_path)
-                    st.session_state.debug_log.append(f"✅ Step 1: Replaced {len(mapping)} placeholders → {step1_path}")
+                    st.session_state.debug_log.append(
+                        f"✅ Step 1: Replaced {len(mapping)} placeholders → {step1_path}"
+                    )
 
                     # --- Step 2: Insert EWP image ---
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp2:
@@ -741,58 +779,97 @@ with tab_generate:
 
                     image_stream = BytesIO(ewp_bytes)
                     replace_ewp_image(step1_path, image_stream, step2_path)
-                    st.session_state.debug_log.append(f"✅ Step 2: Inserted EWP image → {step2_path}")
+                    st.session_state.debug_log.append(
+                        f"✅ Step 2: Inserted EWP image → {step2_path}"
+                    )
 
                     # Diagnostic on step2 BEFORE embed
                     diag = check_placeholder_in_docx(step2_path, "{{FIO_REF}}")
                     st.session_state.debug_log.append("--- Diagnostic on Step 2 output ---")
-                    st.session_state.debug_log.append(f"Exists in raw XML: **{diag['exists_raw']}**")
-                    st.session_state.debug_log.append(f"Exists in concatenated: **{diag['exists_concatenated']}**")
-                    if diag.get("runs_with_ref"):
-                        for run in diag["runs_with_ref"][:10]:
-                            st.session_state.debug_log.append(f"  Run #{run['index']}: `{run['text']}`")
+                    st.session_state.debug_log.append(
+                        f"Exists in raw XML: **{diag['exists_raw']}**"
+                    )
+                    st.session_state.debug_log.append(
+                        f"Exists in concatenated: **{diag['exists_concatenated']}**"
+                    )
 
                     # --- Step 3: Embed FIO at {{FIO_REF}} ---
                     final_path = step2_path
-
                     has_attachment = bool(st.session_state.get("fio_attachment_bytes"))
-                    st.session_state.debug_log.append(f"FIO attachment bytes: **{len(st.session_state.get('fio_attachment_bytes') or b'')}**")
-                    st.session_state.debug_log.append(f"OLE_EMBED_AVAILABLE: **{OLE_EMBED_AVAILABLE}**")
 
-                    if has_attachment and OLE_EMBED_AVAILABLE:
+                    st.session_state.debug_log.append(
+                        f"FIO attachment bytes: **{len(st.session_state.get('fio_attachment_bytes') or b'')}**"
+                    )
+                    st.session_state.debug_log.append(
+                        f"PACKAGE_EMBED_AVAILABLE: **{PACKAGE_EMBED_AVAILABLE}**"
+                    )
+                    st.session_state.debug_log.append(
+                        f"OLE_EMBED_AVAILABLE: **{OLE_EMBED_AVAILABLE}**"
+                    )
+
+                    if has_attachment:
                         try:
                             with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp3:
                                 step3_path = tmp3.name
 
-                            embed_excel_in_docx(
-                                docx_path=step2_path,
-                                xlsx_bytes=st.session_state.fio_attachment_bytes,
-                                xlsx_filename=st.session_state.fio_attachment_name or "FIO.xlsx",
-                                placeholder="{{FIO_REF}}",
-                                output_path=step3_path,
-                            )
+                            # Prefer Package, fall back to OLE
+                            if embed_method == "package" and PACKAGE_EMBED_AVAILABLE:
+                                st.session_state.debug_log.append(
+                                    "🔧 Using **Package** embedding..."
+                                )
+                                embed_excel_as_package(
+                                    docx_path=step2_path,
+                                    xlsx_bytes=st.session_state.fio_attachment_bytes,
+                                    xlsx_filename=st.session_state.fio_attachment_name or "FIO.xlsx",
+                                    placeholder="{{FIO_REF}}",
+                                    output_path=step3_path,
+                                )
+                                st.session_state.debug_log.append(
+                                    f"✅ Step 3: Package embed → {step3_path}"
+                                )
+                                st.info("📦 FIO Excel embedded as Package at `{{FIO_REF}}`.")
+
+                            elif OLE_EMBED_AVAILABLE:
+                                st.session_state.debug_log.append(
+                                    "🔧 Using **Legacy OLE** embedding..."
+                                )
+                                embed_excel_in_docx(
+                                    docx_path=step2_path,
+                                    xlsx_bytes=st.session_state.fio_attachment_bytes,
+                                    xlsx_filename=st.session_state.fio_attachment_name or "FIO.xlsx",
+                                    placeholder="{{FIO_REF}}",
+                                    output_path=step3_path,
+                                )
+                                st.session_state.debug_log.append(
+                                    f"✅ Step 3: OLE embed → {step3_path}"
+                                )
+                                st.info("🔗 FIO Excel embedded as OLE at `{{FIO_REF}}`.")
+                            else:
+                                raise ValueError("No embedder available")
+
                             final_path = step3_path
-                            st.session_state.debug_log.append(f"✅ Step 3: OLE embed → {step3_path}")
-                            st.info("📎 FIO Excel embedded at `{{FIO_REF}}` in Section 13.")
+
                         except ValueError as ve:
                             st.session_state.debug_log.append(f"❌ Step 3 ValueError: {ve}")
                             st.error(f"❌ Embed failed: {ve}")
                             try:
-                                from utils.ole_embedder import diagnose_placeholder
                                 diag2 = diagnose_placeholder(step2_path, "{{FIO_REF}}")
-                                st.session_state.debug_log.append(f"Diagnostic: {json.dumps(diag2, indent=2)}")
+                                st.session_state.debug_log.append(
+                                    f"Diagnostic: {json.dumps(diag2, indent=2)}"
+                                )
                             except Exception as de:
                                 st.session_state.debug_log.append(f"Diagnostic failed: {de}")
                         except Exception as embed_err:
-                            st.session_state.debug_log.append(f"❌ Step 3 Exception: {embed_err}")
+                            st.session_state.debug_log.append(
+                                f"❌ Step 3 Exception: {embed_err}"
+                            )
                             st.error(f"❌ Embedding failed: {embed_err}")
                             st.exception(embed_err)
-                    elif not has_attachment:
-                        st.session_state.debug_log.append("⚠️ No FIO attachment — skipped embed")
+                    else:
+                        st.session_state.debug_log.append(
+                            "⚠️ No FIO attachment — skipped embed"
+                        )
                         st.warning("⚠️ No FIO attachment — `{{FIO_REF}}` stays as text.")
-                    elif not OLE_EMBED_AVAILABLE:
-                        st.session_state.debug_log.append("❌ OLE embedder not available")
-                        st.error("❌ OLE embedder not available — check `utils/ole_embedder.py`.")
 
                     # --- Step 4: Read output ---
                     with open(final_path, "rb") as f:
@@ -805,7 +882,9 @@ with tab_generate:
                         "bytes": output_bytes,
                         "filename": output_filename,
                     }
-                    st.session_state.debug_log.append(f"✅ Final: {output_filename} ({len(output_bytes)} bytes)")
+                    st.session_state.debug_log.append(
+                        f"✅ Final: {output_filename} ({len(output_bytes)} bytes)"
+                    )
                     st.success("✅ MOP generated successfully!")
 
                 except Exception as e:
@@ -827,6 +906,12 @@ with tab_generate:
             for line in st.session_state.debug_log:
                 st.markdown(f"- {line}")
 
+        # Display OLE debug log
+        if st.session_state.get("ole_debug_log"):
+            with st.expander("🔍 OLE/Embed Debug Log", expanded=False):
+                for line in st.session_state.ole_debug_log:
+                    st.code(line, language="text")
+
         if st.session_state.get("generated_file"):
             gen = st.session_state.generated_file
             st.markdown("---")
@@ -840,6 +925,60 @@ with tab_generate:
                 key="download_btn",
             )
             st.caption(f"File: `{gen['filename']}` — {len(gen['bytes']) / 1024:.1f} KB")
+
+            # Verify button
+            if st.button("🔍 Verify Embedding", key="verify_embed_btn"):
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
+                    tmp.write(gen["bytes"])
+                    tmp_path = tmp.name
+
+                try:
+                    with zipfile.ZipFile(tmp_path, "r") as z:
+                        names = z.namelist()
+
+                        col1, col2 = st.columns(2)
+
+                        with col1:
+                            st.markdown("**Files in DOCX:**")
+                            has_bin = any("oleObject" in n and n.endswith(".bin") for n in names)
+                            has_pkg = any("oleObject" in n and n.endswith(".xlsx") for n in names)
+                            has_icon = any("excel_icon" in n for n in names)
+                            st.markdown(f"- `oleObject*.bin`: {'✅' if has_bin else '❌'}")
+                            st.markdown(f"- `oleObject*.xlsx`: {'✅' if has_pkg else '❌'}")
+                            st.markdown(f"- `excel_icon*.png`: {'✅' if has_icon else '❌'}")
+
+                        with col2:
+                            st.markdown("**XML Checks:**")
+                            doc_xml = z.read("word/document.xml").decode("utf-8")
+
+                            has_ole = "<o:OLEObject" in doc_xml
+                            has_ns_o = 'xmlns:o=' in doc_xml
+                            has_ns_v = 'xmlns:v=' in doc_xml
+
+                            st.markdown(f"- `<o:OLEObject>`: {'✅' if has_ole else '❌'}")
+                            st.markdown(f"- `xmlns:o`: {'✅' if has_ns_o else '❌'}")
+                            st.markdown(f"- `xmlns:v`: {'✅' if has_ns_v else '❌'}")
+
+                            rels = z.read("word/_rels/document.xml.rels").decode("utf-8")
+                            has_ole_rel = "oleObject" in rels
+                            has_pkg_rel = "package" in rels
+                            st.markdown(f"- OLE relationship: {'✅' if has_ole_rel else '❌'}")
+                            st.markdown(f"- Package relationship: {'✅' if has_pkg_rel else '❌'}")
+
+                            # ID uniqueness
+                            shape_ids = re.findall(r'ShapeID="([^"]+)"', doc_xml)
+                            object_ids = re.findall(r'ObjectID="([^"]+)"', doc_xml)
+                            shape_unique = len(shape_ids) == len(set(shape_ids))
+                            object_unique = len(object_ids) == len(set(object_ids))
+                            st.markdown(f"- ShapeIDs unique: {'✅' if shape_unique else '❌'}")
+                            st.markdown(f"- ObjectIDs unique: {'✅' if object_unique else '❌'}")
+
+                        with st.expander("📄 Full file list"):
+                            for n in sorted(names):
+                                st.code(n)
+
+                finally:
+                    os.unlink(tmp_path)
 
 
 # ============================================================
