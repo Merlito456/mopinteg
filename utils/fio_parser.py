@@ -22,7 +22,7 @@ def parse_fio(file) -> dict:
         ws = wb["JUNCTION_SCHEDULE"]
         rows = list(ws.iter_rows(values_only=True))
 
-        # --- FIO Name ---
+        # FIO Name
         for row in rows:
             for i, cell in enumerate(row):
                 if cell and "FIO NAME" in str(cell).upper():
@@ -31,13 +31,13 @@ def parse_fio(file) -> dict:
                             result["FIO_REF"] = row[j].strip()
                             break
 
-        # --- OLT Site ---
+        # OLT Site
         for row in rows:
             for cell in row:
                 if cell and isinstance(cell, str) and cell.upper().startswith("OLT:"):
                     result["OLT_SITE"] = cell.replace("OLT:", "").strip()
 
-        # --- AN Site ---
+        # AN Site
         for row in rows:
             for cell in row:
                 if cell and isinstance(cell, str):
@@ -46,7 +46,7 @@ def parse_fio(file) -> dict:
                         result["AN_SITE"] = m.group(0)
                         break
 
-        # --- AG1 / AG2 ---
+        # AG1 / AG2
         for row in rows:
             for cell in row:
                 if cell and isinstance(cell, str):
@@ -55,7 +55,7 @@ def parse_fio(file) -> dict:
                     if "LAPASA-MIN836" in cell or "LAPASA_MIN836" in cell:
                         result["AG2_NODE"] = "LAPASA-MIN836-TRS_DC_AG-R1-01"
 
-        # --- AN Trunk ID ---
+        # AN Trunk ID
         for row in rows:
             for cell in row:
                 if cell and isinstance(cell, str):
@@ -63,7 +63,7 @@ def parse_fio(file) -> dict:
                         result["AN_TRUNK_ID"] = "Eth-Trunk5"
                         break
 
-        # --- AN Uplink Port ---
+        # AN Uplink Port
         for row in rows:
             for cell in row:
                 if cell and isinstance(cell, str):
@@ -72,7 +72,7 @@ def parse_fio(file) -> dict:
                         result["AN_UPLINK_PORT"] = "GE0/4/2"
                         break
 
-        # --- OM VLAN / GW / DHCP Block / OLT MGMT IP ---
+        # OM VLAN / GW / DHCP
         for row in rows:
             for cell in row:
                 if cell and str(cell).strip() == "734":
@@ -83,7 +83,7 @@ def parse_fio(file) -> dict:
                     result["OLT_OM_GW"] = "10.168.196.193"
                     result["OLT_MGMT_IP"] = "10.168.196.226"
 
-        # --- SIP VLAN ---
+        # SIP VLAN
         for row in rows:
             for cell in row:
                 if cell and str(cell).strip() == "2109":
@@ -91,25 +91,25 @@ def parse_fio(file) -> dict:
                     result["DHCP_BLOCK_SIP"] = "10.202.192.0/19"
                     result["DHCP_GW_SIP"] = "10.202.192.1"
 
-        # --- HSI VLAN ---
+        # HSI VLAN
         for row in rows:
             for cell in row:
                 if cell and str(cell).strip() == "2112":
                     result["VLAN_HSI"] = "2112"
 
-        # --- IPOE1 VLAN ---
+        # IPOE1 VLAN
         for row in rows:
             for cell in row:
                 if cell and str(cell).strip() == "3013":
                     result["VLAN_IPOE1"] = "3013"
 
-        # --- IPOE2 VLAN ---
+        # IPOE2 VLAN
         for row in rows:
             for cell in row:
                 if cell and str(cell).strip() == "1268":
                     result["VLAN_IPOE2"] = "1268"
 
-        # --- AGG Nodes ---
+        # AGG Nodes
         for row in rows:
             for cell in row:
                 if cell and isinstance(cell, str):
@@ -119,7 +119,7 @@ def parse_fio(file) -> dict:
                     if "CDO-MIN1092-AGGFMN-X16A-02" in cell:
                         result["AGG_NODE_OM"] = "CDO-MIN1092-AGGFMN-X16A-02"
 
-        # --- BNG Nodes ---
+        # BNG Nodes
         for row in rows:
             for cell in row:
                 if cell and isinstance(cell, str):
@@ -128,7 +128,7 @@ def parse_fio(file) -> dict:
                     if "DAVCLS-FMAGG-001-MIN2031" in cell:
                         result["BNG_NODE_IPOE2"] = "DAVCLS-FMAGG-001-MIN2031"
 
-        # --- CX600 VE ports ---
+        # CX600 VE ports
         for row in rows:
             for cell in row:
                 if cell and isinstance(cell, str):
@@ -142,7 +142,7 @@ def parse_fio(file) -> dict:
                         m = re.search(r"100GE\d+/\d+/\d+", cell)
                         result["CX600_UPLINK_PORT"] = m.group(0)
 
-        # --- CABINET NAME ---
+        # CABINET NAME
         for row in rows:
             for cell in row:
                 if cell and isinstance(cell, str) and re.match(r"^CDO_\d+_GPONA_\d+$", cell.strip()):
@@ -158,11 +158,9 @@ def parse_fio(file) -> dict:
         for row in rows:
             for cell in row:
                 if cell and isinstance(cell, str):
-                    # CX600 node
                     if "LAPASA-MIN836" in cell and "CX600" in cell:
                         result["CX600_NODE"] = "LAPASA-MIN836-TRS_DC_AG-R1-01"
 
-                    # VC IDs (primary)
                     if "25011194" in cell:
                         result.setdefault("VCID_OM_PRIMARY", "25011194")
                     if "25011195" in cell:
@@ -174,7 +172,6 @@ def parse_fio(file) -> dict:
                     if "3412682705" in cell:
                         result.setdefault("VCID_IPOE2_PRIMARY", "3412682705")
 
-                    # VC IDs (secondary)
                     if "26011194" in cell:
                         result.setdefault("VCID_OM_SECONDARY", "26011194")
                     if "26011195" in cell:
@@ -200,7 +197,7 @@ def parse_fio(file) -> dict:
                         result["OLT_SITE"] = m.group(0)
 
     # ============================================================
-    # DEFAULTS (fallback if extraction missed)
+    # DEFAULTS
     # ============================================================
     defaults = {
         "OLT_SITE": "CDO_013_GPONA_02",
@@ -268,6 +265,21 @@ def parse_fio(file) -> dict:
         "VCID_IPOE2_SECONDARY": "3912682705",
         "OLT_UPLINK_PORT": "1/1/1",
         "OLT_LAG_ID": "10",
+        "OLT_PRODUCT": "Lightspan MF-2",
+        "OLT_PRODUCT_SHORT": "MF-2",
+        "AN_PRODUCT": "ATN 980C",
+        "AN_PRODUCT_FAMILY": "ATN Series Equipment",
+        "AG_SYSTEM": "CX600(V8)",
+        "AG_PRODUCT": "CX600 Series Equipment",
+        "AG_MODEL": "CX600-X8(V8)",
+        "CABINET_ENTRY": "Outdoor",
+        "E2E_SYSTEM_1": "Lightspan MF-2",
+        "E2E_SYSTEM_2": "CX600(V8)",
+        "E2E_SYSTEM_3": "ATN 980C",
+        "AGG_NODE_SIP_HSI_L2": "MINALWANA-FMAGG-002-MIN1092",
+        "CORE_NODE_1": "CDO-PS-PTR-002",
+        "CORE_NODE_2": "CDO-PS-PTR-001/002",
+        "BNG_NODE": "CDO_CDO_BNG_002",
     }
 
     for k, v in defaults.items():
