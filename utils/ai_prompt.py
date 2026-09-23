@@ -1,6 +1,16 @@
 """
 Gemini prompt template and robust response parser.
-Handles single quotes, markdown fences, trailing commas, Python literals, etc.
+
+Handles:
+- Pure JSON
+- JSON inside ```json ... ``` fences
+- Multiple JSON blocks (uses FIRST valid one)
+- Single quotes instead of double quotes
+- Trailing commas
+- Python literals: None, True, False
+- Leading/trailing explanatory text
+- Extra whitespace / newlines
+- Braces inside string literals
 """
 import re
 import json
@@ -10,12 +20,14 @@ import json
 # Gemini Prompt Template
 # ============================================================
 GEMINI_PROMPT_TEMPLATE = """CRITICAL OUTPUT INSTRUCTIONS:
-- Return ONLY a valid JSON object
-- Use DOUBLE quotes for all keys and string values
+- Return EXACTLY ONE JSON object
+- Do NOT include any other JSON, examples, or schema echo
 - Do NOT wrap in markdown code fences
-- Do NOT include any explanatory text before or after the JSON
+- Do NOT include explanatory text before or after
+- Use DOUBLE quotes for all keys and string values
 - Do NOT include trailing commas
-- For missing values, use null (not None or "N/A")
+- For missing values, use null
+- Output MUST start with `{` and end with `}` — nothing else
 
 Example of correct output:
 {
@@ -38,6 +50,7 @@ FIELDS TO EXTRACT:
 {
   "CIRCUIT_ID": "B2C VMDU FTH",
   "OLT_PRODUCT": "Lightspan MF-2",
+  "OLT_PRODUCT_SHORT": "e.g., MF-2",
   "OLT_SITE": "e.g., CDO_013_GPONA_02",
   "OLT_MGMT_IP": "e.g., 10.168.196.226",
   "OLT_OM_VLAN": "e.g., 734",
@@ -115,9 +128,6 @@ FIELDS TO EXTRACT:
   "E2E_SYSTEM_2": "e.g., CX600(V8)",
   "E2E_SYSTEM_3": "e.g., ATN 980C",
   "FIO_REF": "e.g., FIO-LCGCDONG01FTTx_FMC",
-  "OLT_UPLINK_PORT": "e.g., 1/1/1",
-  "OLT_LAG_ID": "e.g., 10",
-  "OLT_PRODUCT_SHORT": "e.g., MF-2",
   "SERVICE_TYPE": "e.g., Wireline voice and data",
   "PRODUCT_TYPE": "e.g., Voice and Broadband",
   "MVNO_IR": "e.g., NA"
@@ -144,16 +154,18 @@ OUTPUT: A single JSON object with all the fields above.
 # ============================================================
 def parse_ai_response(response_text: str) -> dict:
     """
-    Robustly parse AI (Gemini/Claude/GPT) responses into a dict.
+    Robustly parse AI responses into a dict.
 
     Handles:
     - Pure JSON
-    - JSON inside ```json ... ``` or ``` ... ``` fences
+    - JSON inside ```json ... ``` fences
+    - Multiple JSON blocks (uses FIRST valid one)
     - Single quotes instead of double quotes
     - Trailing commas
     - Python literals: None, True, False
     - Leading/trailing explanatory text
     - Extra whitespace / newlines
+    - Braces inside string literals
 
     Raises ValueError if no valid JSON object can be extracted.
     """
@@ -163,10 +175,10 @@ def parse_ai_response(response_text: str) -> dict:
     text = response_text.strip()
 
     # ------------------------------------------------------------
-    # STEP 1: Strip markdown code fences
+    # STEP 1: Strip markdown code fences if present
     # ------------------------------------------------------------
     fence_match = re.search(
-        r"```(?:json|JSON|python|py)?\s*(\{.*?\})\s*```",
+        r"```(?:json|JSON|python|py)?\s*(.*?)```",
         text,
         re.DOTALL,
     )
@@ -174,64 +186,129 @@ def parse_ai_response(response_text: str) -> dict:
         text = fence_match.group(1).strip()
 
     # ------------------------------------------------------------
-    # STEP 2: Try direct JSON parse first (strict)
+    # STEP 2: Try strict JSON parse on the whole text
     # ------------------------------------------------------------
     try:
         data = json.loads(text)
-        return _clean_and_return(data)
+        if isinstance(data, dict):
+            return _clean_and_return(data)
     except json.JSONDecodeError:
         pass
 
     # ------------------------------------------------------------
-    # STEP 3: Extract the outermost { ... } block
+    # STEP 3: Extract ALL balanced { ... } blocks and try each
     # ------------------------------------------------------------
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
+    blocks = _find_all_json_blocks(text)
+
+    if not blocks:
         raise ValueError(
-            "No JSON object found in response. "
-            "Expected a `{ ... }` block."
+            "No JSON object found in response. Expected a `{ ... }` block."
         )
 
-    json_str = text[start:end + 1]
+    last_error = None
 
-    # ------------------------------------------------------------
-    # STEP 4: Try parsing the extracted block
-    # ------------------------------------------------------------
-    try:
-        data = json.loads(json_str)
-        return _clean_and_return(data)
-    except json.JSONDecodeError:
-        pass
+    # Try each block — first valid dict wins
+    for block in blocks:
+        # Attempt 3a: strict parse
+        try:
+            data = json.loads(block)
+            if isinstance(data, dict):
+                return _clean_and_return(data)
+        except json.JSONDecodeError as e:
+            last_error = e
 
-    # ------------------------------------------------------------
-    # STEP 5: Fix common AI issues and retry
-    # ------------------------------------------------------------
-    fixed = _fix_common_json_issues(json_str)
+        # Attempt 3b: apply fixes, then parse
+        fixed = _fix_common_json_issues(block)
+        try:
+            data = json.loads(fixed)
+            if isinstance(data, dict):
+                return _clean_and_return(data)
+        except json.JSONDecodeError as e:
+            last_error = e
 
-    try:
-        data = json.loads(fixed)
-        return _clean_and_return(data)
-    except json.JSONDecodeError as e:
-        # --------------------------------------------------------
-        # STEP 6: Last resort — ast.literal_eval for Python dicts
-        # --------------------------------------------------------
+        # Attempt 3c: ast.literal_eval (Python dict)
         try:
             import ast
             data = ast.literal_eval(fixed)
             if isinstance(data, dict):
                 return _clean_and_return(data)
-        except Exception:
-            pass
+        except Exception as e:
+            last_error = e
 
-        # Raise with context
-        snippet = json_str[:200].replace("\n", " ")
-        raise ValueError(
-            f"Invalid JSON: {e}\n\n"
-            f"Extracted snippet:\n{snippet}..."
-        )
+    # If we get here, no block was valid
+    snippet = blocks[0][:300].replace("\n", " ") if blocks else ""
+    raise ValueError(
+        f"Invalid JSON: {last_error}\n\n"
+        f"Found {len(blocks)} block(s). First block snippet:\n{snippet}..."
+    )
 
 
+# ============================================================
+# Balanced-Brace Scanner
+# ============================================================
+def _find_all_json_blocks(text: str) -> list:
+    """
+    Find ALL balanced { ... } blocks in the text using a brace counter.
+    Respects strings so braces inside string literals don't break the count.
+
+    Returns a list of block strings (each starting with '{' and ending with '}').
+    """
+    blocks = []
+    depth = 0
+    start_idx = None
+    in_string = False
+    string_char = None
+
+    i = 0
+    n = len(text)
+
+    while i < n:
+        ch = text[i]
+
+        # Handle escape sequences inside strings
+        if in_string and ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+
+        # Toggle string mode
+        if ch in ('"', "'"):
+            if not in_string:
+                in_string = True
+                string_char = ch
+            elif string_char == ch:
+                in_string = False
+                string_char = None
+            i += 1
+            continue
+
+        # Skip brace counting if inside a string
+        if in_string:
+            i += 1
+            continue
+
+        # Track brace depth
+        if ch == "{":
+            if depth == 0:
+                start_idx = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start_idx is not None:
+                blocks.append(text[start_idx:i + 1])
+                start_idx = None
+            elif depth < 0:
+                # Unbalanced — reset
+                depth = 0
+                start_idx = None
+
+        i += 1
+
+    return blocks
+
+
+# ============================================================
+# Common JSON Fixes
+# ============================================================
 def _fix_common_json_issues(text: str) -> str:
     """
     Apply heuristic fixes for common AI JSON mistakes.
@@ -249,27 +326,12 @@ def _fix_common_json_issues(text: str) -> str:
 
     # 3. Convert single-quoted strings to double-quoted
     try:
-        # Only convert if there are single quotes but no double quotes
-        # (safer heuristic)
         if "'" in text and '"' not in text:
             text = text.replace("'", '"')
         else:
-            # More careful: convert single-quoted keys/values individually
-            text = re.sub(
-                r"'([^']*)'(\s*:)",
-                r'"\1"\2',
-                text,
-            )
-            text = re.sub(
-                r"(:\s*)'([^']*)'",
-                r'\1"\2"',
-                text,
-            )
-            text = re.sub(
-                r"(,\s*)'([^']*)'",
-                r'\1"\2"',
-                text,
-            )
+            text = re.sub(r"'([^']*)'(\s*:)", r'"\1"\2', text)
+            text = re.sub(r"(:\s*)'([^']*)'", r'\1"\2"', text)
+            text = re.sub(r"(,\s*)'([^']*)'", r'\1"\2"', text)
     except Exception:
         pass
 
@@ -282,6 +344,9 @@ def _fix_common_json_issues(text: str) -> str:
     return text.strip()
 
 
+# ============================================================
+# Cleanup & Return
+# ============================================================
 def _clean_and_return(data) -> dict:
     """
     Clean up parsed data:
@@ -300,7 +365,7 @@ def _clean_and_return(data) -> dict:
         if v is not None and v != ""
     }
 
-    # Convert to strings (preserve nested if needed)
+    # Convert to strings
     cleaned = {}
     for k, v in data.items():
         if isinstance(v, (str, int, float, bool)):
