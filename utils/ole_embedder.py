@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import zipfile
+import html
 from pathlib import Path
 from io import BytesIO
 
@@ -24,6 +25,21 @@ OLE_PROG_ID = "Excel.Sheet.12"          # Excel 2007+ (.xlsx)
 OLE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.oleObject"
 OLE_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject"
 ICON_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+
+
+# ============================================================
+# Diagnostic logger
+# ============================================================
+def _log(msg: str):
+    """Print to stdout (Streamlit logs it) AND to session state for UI display."""
+    print(f"[OLE] {msg}")
+    try:
+        import streamlit as st
+        if "ole_debug_log" not in st.session_state:
+            st.session_state.ole_debug_log = []
+        st.session_state.ole_debug_log.append(msg)
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -60,7 +76,7 @@ def embed_excel_in_docx(
 
     # ---- Diagnostic logging ----
     _log("=" * 60)
-    _log(f"EMBED EXCEL — START")
+    _log("EMBED EXCEL — START")
     _log(f"  Source:      {docx_path}")
     _log(f"  Output:      {output_path}")
     _log(f"  Placeholder: {placeholder!r}")
@@ -90,21 +106,18 @@ def embed_excel_in_docx(
     _log(f"  [2] document.xml size: {len(doc_xml):,} chars")
     _log(f"  [2] Placeholder found in XML: {placeholder in doc_xml}")
 
-    # ---- Diagnostic: show where the placeholder is ----
     if placeholder in doc_xml:
         idx = doc_xml.find(placeholder)
         snippet = doc_xml[max(0, idx - 100):idx + 100]
         _log(f"  [2] Context: ...{snippet}...")
 
     if placeholder not in doc_xml:
-        # Try case-insensitive
+        # Case-insensitive fallback
         if placeholder.upper() in doc_xml.upper():
-            _log(f"  [2] ⚠️ Found case-insensitive match")
-            # Find actual case
+            _log("  [2] ⚠️ Found case-insensitive match")
             idx = doc_xml.upper().find(placeholder.upper())
-            actual = doc_xml[idx:idx+len(placeholder)]
+            actual = doc_xml[idx:idx + len(placeholder)]
             _log(f"  [2] ⚠️ Actual text: {actual!r}")
-            # Use actual text
             placeholder = actual
         else:
             raise ValueError(
@@ -186,14 +199,14 @@ def embed_excel_in_docx(
             "</Types>",
             f'<Default Extension="bin" ContentType="{OLE_CONTENT_TYPE}"/></Types>',
         )
-        _log(f"  [9] Added .bin content type")
+        _log("  [9] Added .bin content type")
 
     if 'Extension="png"' not in ct_xml:
         ct_xml = ct_xml.replace(
             "</Types>",
             '<Default Extension="png" ContentType="image/png"/></Types>',
         )
-        _log(f"  [9] Added .png content type")
+        _log("  [9] Added .png content type")
 
     ct_path.write_text(ct_xml, encoding="utf-8")
 
@@ -206,38 +219,18 @@ def embed_excel_in_docx(
                 z.write(file_path, str(arcname).replace("\\", "/"))
 
     _log(f"  [10] Re-zipped → {output_path}")
-    _log(f"EMBED EXCEL — ✅ SUCCESS")
+    _log("EMBED EXCEL — ✅ SUCCESS")
     _log("=" * 60)
 
-    # Cleanup
     shutil.rmtree(temp_dir, ignore_errors=True)
-
     return str(output_path)
-
-
-# ============================================================
-# Diagnostic logger
-# ============================================================
-def _log(msg: str):
-    """Print to stdout (Streamlit logs it) AND to a global list for UI."""
-    print(f"[OLE] {msg}")
-    try:
-        import streamlit as st
-        if "ole_debug_log" not in st.session_state:
-            st.session_state.ole_debug_log = []
-        st.session_state.ole_debug_log.append(msg)
-    except Exception:
-        pass
 
 
 # ============================================================
 # Icon Handling
 # ============================================================
 def _ensure_excel_icon(temp_dir: Path, ole_index: int) -> tuple:
-    """
-    Ensure an Excel icon exists in /word/media/.
-    Returns (icon_path, icon_filename).
-    """
+    """Ensure an Excel icon exists in /word/media/."""
     media_dir = temp_dir / "word" / "media"
     media_dir.mkdir(parents=True, exist_ok=True)
 
@@ -256,14 +249,25 @@ def _ensure_excel_icon(temp_dir: Path, ole_index: int) -> tuple:
 
 
 def _generate_excel_icon_bytes() -> bytes:
-    """Generate a minimal Excel-green icon PNG."""
+    """
+    Generate a 48x48 Excel-green icon PNG.
+    Tries to load a real icon from assets/excel_icon.png first.
+    """
+    # Try to load a real icon file
+    icon_file = Path(__file__).parent.parent / "assets" / "excel_icon.png"
+    if icon_file.exists():
+        with open(icon_file, "rb") as f:
+            return f.read()
+
     try:
         from PIL import Image, ImageDraw
-        img = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+        img = Image.new("RGBA", (48, 48), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-        draw.rectangle([(2, 2), (30, 30)], fill=(33, 115, 70, 255))
-        draw.line([(10, 10), (22, 22)], fill="white", width=3)
-        draw.line([(22, 10), (10, 22)], fill="white", width=3)
+        # Excel green rounded square
+        draw.rounded_rectangle([(2, 2), (46, 46)], radius=6, fill=(33, 115, 70, 255))
+        # White "X" for Excel
+        draw.line([(14, 14), (34, 34)], fill="white", width=4)
+        draw.line([(34, 14), (14, 34)], fill="white", width=4)
 
         buf = BytesIO()
         img.save(buf, format="PNG")
@@ -279,17 +283,25 @@ def _generate_excel_icon_bytes() -> bytes:
 
 
 # ============================================================
-# OLE Object XML Builder
+# OLE Object XML Builder — WITH FILENAME DISPLAY
 # ============================================================
 def _build_ole_xml(ole_rid: str, icon_rid: str, display_name: str) -> str:
-    """Build the OLE object XML."""
+    """
+    Build the OLE object XML with icon + filename display.
+    Word shows: [📊 Excel icon] filename.xlsx
+    """
+    safe_name = html.escape(display_name)
+
     ole_xml = (
+        # ---- OLE object run (icon) ----
         '<w:r>'
         '<w:object w:dxaOrig="1440" w:dyaOrig="1440">'
+        # Icon visual — bigger (32pt)
         '<v:shape id="_x0000_i1025" type="#_x0000_t75" '
-        'style="width:24pt;height:24pt" fillcolor="auto" stroked="f">'
-        f'<v:imagedata r:id="{icon_rid}" o:title="{display_name}"/>'
+        'style="width:32pt;height:32pt" fillcolor="auto" stroked="f">'
+        f'<v:imagedata r:id="{icon_rid}" o:title="{safe_name}"/>'
         '</v:shape>'
+        # OLE object reference
         f'<o:OLEObject Type="Embed" ProgID="{OLE_PROG_ID}" '
         'ShapeID="_x0000_i1025" DrawAspect="Icon" '
         'ObjectID="_1234567890" '
@@ -298,6 +310,11 @@ def _build_ole_xml(ole_rid: str, icon_rid: str, display_name: str) -> str:
         '</o:OLEObject>'
         '</w:object>'
         '<w:rPr><w:noProof/></w:rPr>'
+        '</w:r>'
+        # ---- Filename text run (displayed after the icon) ----
+        '<w:r>'
+        '<w:rPr><w:noProof/></w:rPr>'
+        f'<w:t xml:space="preserve"> {safe_name}</w:t>'
         '</w:r>'
     )
     return ole_xml
@@ -310,13 +327,8 @@ def _replace_placeholder_with_ole(doc_xml: str, placeholder: str, ole_xml: str) 
     """
     Replace placeholder with OLE XML.
     Returns (updated_xml, replaced: bool).
-
-    Simple, robust approach because diagnostic confirmed the placeholder
-    is contiguous in the XML.
     """
-    # ============================================================
     # Strategy 1: Exact patterns
-    # ============================================================
     patterns = [
         f"<w:t>{placeholder}</w:t>",
         f'<w:t xml:space="preserve">{placeholder}</w:t>',
@@ -327,9 +339,7 @@ def _replace_placeholder_with_ole(doc_xml: str, placeholder: str, ole_xml: str) 
             doc_xml = doc_xml.replace(pattern, ole_xml, 1)
             return doc_xml, True
 
-    # ============================================================
     # Strategy 2: Regex match on <w:t ...>...</w:t>
-    # ============================================================
     regex = re.compile(
         r"<w:t(?:\s[^>]*)?>" + re.escape(placeholder) + r"</w:t>",
         re.DOTALL,
@@ -339,27 +349,19 @@ def _replace_placeholder_with_ole(doc_xml: str, placeholder: str, ole_xml: str) 
         doc_xml = doc_xml[:match.start()] + ole_xml + doc_xml[match.end():]
         return doc_xml, True
 
-    # ============================================================
-    # Strategy 3: Brute-force — replace raw placeholder string
-    # (works because the placeholder is contiguous in XML)
-    # ============================================================
+    # Strategy 3: Brute-force raw replace
     if placeholder in doc_xml:
         doc_xml = doc_xml.replace(placeholder, ole_xml, 1)
         return doc_xml, True
 
-    # ============================================================
-    # Not found
-    # ============================================================
     return doc_xml, False
 
 
 # ============================================================
-# Standalone diagnostic — inspect a template DOCX
+# Standalone diagnostic
 # ============================================================
 def diagnose_placeholder(docx_path: str, placeholder: str = "{{FIO_REF}}") -> dict:
-    """
-    Standalone diagnostic tool: check if a placeholder exists and how it's stored.
-    """
+    """Standalone diagnostic tool: check if a placeholder exists in the DOCX."""
     docx_path = Path(docx_path)
     result = {
         "placeholder": placeholder,
@@ -380,10 +382,8 @@ def diagnose_placeholder(docx_path: str, placeholder: str = "{{FIO_REF}}") -> di
             z.extractall(temp_dir)
 
         doc_xml = (temp_dir / "word" / "document.xml").read_text(encoding="utf-8")
-
         result["exists_raw"] = placeholder in doc_xml
 
-        # Find exact <w:t> patterns
         for pattern_type in [
             f"<w:t>{placeholder}</w:t>",
             f'<w:t xml:space="preserve">{placeholder}</w:t>',
@@ -391,13 +391,11 @@ def diagnose_placeholder(docx_path: str, placeholder: str = "{{FIO_REF}}") -> di
             if pattern_type in doc_xml:
                 result["w_t_patterns"].append(pattern_type)
 
-        # Concatenated check
         wt_runs = re.findall(r"<w:t(?:\s[^>]*)?>(.*?)</w:t>", doc_xml, re.DOTALL)
         result["run_count"] = len(wt_runs)
         concatenated = "".join(wt_runs)
         result["exists_concatenated"] = placeholder in concatenated
 
-        # Context
         if placeholder in doc_xml:
             idx = doc_xml.find(placeholder)
             result["context"] = doc_xml[max(0, idx - 150):idx + 150]
