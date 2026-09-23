@@ -57,8 +57,10 @@ if "ewp_candidates" not in st.session_state:
     st.session_state.ewp_candidates = {}
 if "generated_file" not in st.session_state:
     st.session_state.generated_file = None
-if "ai_paste_result" not in st.session_state:
-    st.session_state.ai_paste_result = None
+if "ai_updated_keys" not in st.session_state:
+    st.session_state.ai_updated_keys = set()
+if "force_sync" not in st.session_state:
+    st.session_state.force_sync = False
 
 
 # ============================================================
@@ -78,6 +80,28 @@ def reset_app():
     st.rerun()
 
 
+def sync_widget_state(widget_key, external_value):
+    """
+    Sync a widget's state with an external value from placeholder_values.
+    Only overwrites the widget if the external value has changed
+    since the last sync (tracked via `_last_{widget_key}`).
+    """
+    last_key = f"_last_{widget_key}"
+    current_widget_val = st.session_state.get(widget_key, None)
+    last_synced_val = st.session_state.get(last_key, None)
+
+    # If widget doesn't exist yet → initialize it
+    if widget_key not in st.session_state:
+        st.session_state[widget_key] = external_value
+        st.session_state[last_key] = external_value
+        return
+
+    # If external value changed since last sync → push it into widget
+    if last_synced_val != external_value:
+        st.session_state[widget_key] = external_value
+        st.session_state[last_key] = external_value
+
+
 # ============================================================
 # HEADER
 # ============================================================
@@ -87,9 +111,9 @@ st.markdown(
     Upload the **FIO Excel** and **EWP Image**, verify the mapped values,
     then generate the filled **MOP Integration Template**.
 
-    **Three ways to fill EWP data:**
-    1. 🖼️ **Auto-OCR** — extracts values from the EWP image
-    2. 📋 **Dropdown** — pick from detected candidates
+    **Three ways to fill data:**
+    1. 📊 **Auto-FIO** — extracts values from the FIO Excel
+    2. 🖼️ **Auto-OCR** — extracts values from the EWP image
     3. 🤖 **AI Paste** — use Gemini to extract, paste JSON here
     """
 )
@@ -134,6 +158,11 @@ with st.sidebar:
         f"- Template: {'✅ Found' if os.path.exists(TEMPLATE_PATH) else '❌ Missing'}\n"
         f"- OCR Engine: {'✅ Available' if EWP_OCR_AVAILABLE else '⚠️ Unavailable'}"
     )
+
+    if st.session_state.ai_updated_keys:
+        st.markdown("---")
+        st.markdown("### 🆕 AI-Updated Fields")
+        st.markdown(f"**{len(st.session_state.ai_updated_keys)}** fields updated via AI Paste")
 
 
 # ============================================================
@@ -209,7 +238,7 @@ tab_fio, tab_ewp, tab_ai, tab_doc, tab_preview, tab_generate, tab_ocr = st.tabs(
 # ============================================================
 with tab_fio:
     st.subheader("FIO-Mapped Placeholders")
-    st.caption("Auto-extracted from FIO. Editable.")
+    st.caption("Auto-extracted from FIO. AI Paste and manual edits are reflected here.")
 
     if not st.session_state.fio_uploaded:
         st.warning("⚠️ Upload FIO Excel first.")
@@ -221,20 +250,30 @@ with tab_fio:
                 cols = st.columns(2)
                 for i, item in enumerate(items):
                     key, label = item["key"], item["label"]
+                    current = get_value(key)
+                    widget_key = f"fio_{key}"
+
+                    # Sync widget with external updates (AI Paste)
+                    sync_widget_state(widget_key, current)
+
+                    display_label = f"🆕 {label}" if key in st.session_state.ai_updated_keys else label
+
                     with cols[i % 2]:
-                        val = st.text_input(label, value=get_value(key), key=f"fio_{key}")
-                        if val != get_value(key):
+                        val = st.text_input(display_label, key=widget_key)
+                        if val != current:
                             set_value(key, val)
+                            # Track manual edit as "last synced"
+                            st.session_state[f"_last_{widget_key}"] = val
 
 
 # ============================================================
-# TAB 2: EWP-ONLY (DROPDOWN)
+# TAB 2: EWP-ONLY (DROPDOWN + TEXT)
 # ============================================================
 with tab_ewp:
     st.subheader("EWP-Only Placeholders")
     st.caption(
         "Values are **auto-extracted via OCR**. Where multiple candidates were found, "
-        "**pick from the dropdown**. You can also override manually."
+        "**pick from the dropdown**. AI Paste also populates these fields."
     )
 
     if not st.session_state.ewp_uploaded:
@@ -249,28 +288,46 @@ with tab_ewp:
                 key, label = item["key"], item["label"]
                 candidates = st.session_state.ewp_candidates.get(key, [])
                 current = get_value(key)
+                widget_key = f"ewp_{key}"
+
+                # Sync widget with external updates
+                sync_widget_state(widget_key, current)
+
+                display_label = f"🆕 {label}" if key in st.session_state.ai_updated_keys else label
 
                 with cols[i % 2]:
                     if candidates and len(candidates) > 1:
+                        # Dropdown mode
                         options = ["(none)"] + candidates
-                        default_idx = options.index(current) if current in options else 0
+                        try:
+                            default_idx = options.index(current) if current in options else 0
+                        except Exception:
+                            default_idx = 0
+
+                        # Ensure widget state is one of the options
+                        if st.session_state.get(widget_key) not in options:
+                            st.session_state[widget_key] = options[default_idx]
+
                         pick = st.selectbox(
-                            f"{label} ({len(candidates)} candidates)",
+                            f"{display_label} ({len(candidates)} candidates)",
                             options=options,
-                            index=default_idx,
-                            key=f"ewp_dd_{key}",
+                            key=widget_key,
                         )
                         new_val = "" if pick == "(none)" else pick
                     else:
+                        # Text input mode
                         hint = candidates[0] if candidates else ""
-                        new_val = st.text_input(
-                            label,
-                            value=current or hint,
-                            key=f"ewp_ti_{key}",
+
+                        val = st.text_input(
+                            display_label,
+                            key=widget_key,
                             help=f"OCR detected: {hint}" if hint else "No OCR match",
                         )
+                        new_val = val
+
                     if new_val != current:
                         set_value(key, new_val)
+                        st.session_state[f"_last_{widget_key}"] = new_val
 
 
 # ============================================================
@@ -289,13 +346,14 @@ with tab_ai:
     st.markdown("### Step 2 — Upload FIO + EWP to Gemini, then paste the response below")
 
     ai_response = st.text_area(
-        "Paste Gemini JSON response here",
+        "Paste Gemini JSON response here (must be a JSON object like `{\"key\": \"value\"}`)",
         height=300,
         key="ai_response_textarea",
-        placeholder='{"OLT_SITE": "CDO_013_GPONA_02", ...}',
+        placeholder='{"OLT_SITE": "CDO_013_GPONA_02", "OLT_OM_VLAN": "734", ...}',
     )
 
     col_a, col_b = st.columns([1, 1])
+
     with col_a:
         if st.button("✅ Apply AI Response", use_container_width=True, key="apply_ai_btn"):
             if not ai_response.strip():
@@ -307,12 +365,26 @@ with tab_ai:
                     # Apply each value — only if key is in our placeholder map
                     applied_keys = []
                     unknown_keys = []
+                    all_known_keys = {p["key"] for p in PLACEHOLDER_MAP}
+
                     for k, v in parsed.items():
-                        if any(p["key"] == k for p in PLACEHOLDER_MAP):
+                        if k in all_known_keys:
                             set_value(k, v)
                             applied_keys.append(k)
+
+                            # Clear widget cache so all tabs re-read the new value
+                            for prefix in ("fio_", "ewp_", "doc_", "ewp_dd_", "ewp_ti_"):
+                                ck = f"{prefix}{k}"
+                                if ck in st.session_state:
+                                    del st.session_state[ck]
+                                lk = f"_last_{ck}"
+                                if lk in st.session_state:
+                                    del st.session_state[lk]
                         else:
                             unknown_keys.append(k)
+
+                    # Track AI-updated keys for visual highlight
+                    st.session_state.ai_updated_keys = set(applied_keys)
 
                     st.success(f"✅ Applied {len(applied_keys)} values from AI response")
 
@@ -329,6 +401,9 @@ with tab_ai:
                         with st.expander(f"❌ Unknown keys ({len(unknown_keys)})", expanded=False):
                             st.write(unknown_keys)
 
+                    # Force a rerun so all tabs refresh with new values
+                    st.rerun()
+
                 except ValueError as e:
                     st.error(f"❌ Failed to parse AI response: {e}")
                     st.info(
@@ -336,7 +411,7 @@ with tab_ai:
                         "```json\n"
                         '{\n  "OLT_SITE": "CDO_013_GPONA_02",\n  "OLT_OM_VLAN": "734"\n}\n'
                         "```\n"
-                        "If it returned plain text or a different format, "
+                        "If it returned plain text, Python code, or a different format, "
                         "ask Gemini to re-run using the prompt from Step 1."
                     )
                     with st.expander("🔍 Debug — view pasted text", expanded=False):
@@ -361,6 +436,11 @@ with tab_ai:
                 except Exception as e:
                     st.error(f"❌ Unexpected error: {e}")
 
+    if st.session_state.ai_updated_keys:
+        if st.button("🧹 Clear AI Highlights", key="clear_ai_highlights"):
+            st.session_state.ai_updated_keys = set()
+            st.rerun()
+
     st.markdown("---")
     st.markdown("### 📋 Full List of Expected Data")
     st.caption("Ensure Gemini returns ALL these fields:")
@@ -373,7 +453,7 @@ with tab_ai:
 # ============================================================
 with tab_doc:
     st.subheader("Document Metadata & Fixed Values")
-    st.caption("Sensible defaults — editable.")
+    st.caption("Sensible defaults — editable. AI Paste can override these.")
 
     groups = sorted(set(p["group"] for p in PLACEHOLDER_MAP if p["source"] == "DOC"))
     for group in groups:
@@ -383,10 +463,19 @@ with tab_doc:
             for i, item in enumerate(items):
                 key, label = item["key"], item["label"]
                 default = item.get("default", "")
+                current = get_value(key, default)
+                widget_key = f"doc_{key}"
+
+                # Sync widget with external updates
+                sync_widget_state(widget_key, current)
+
+                display_label = f"🆕 {label}" if key in st.session_state.ai_updated_keys else label
+
                 with cols[i % 2]:
-                    val = st.text_input(label, value=get_value(key, default), key=f"doc_{key}")
-                    if val != get_value(key, default):
+                    val = st.text_input(display_label, key=widget_key)
+                    if val != current:
                         set_value(key, val)
+                        st.session_state[f"_last_{widget_key}"] = val
 
 
 # ============================================================
@@ -408,7 +497,9 @@ with tab_preview:
     for p in PLACEHOLDER_MAP:
         key = p["key"]
         val = get_value(key, p.get("default", ""))
+        marker = "🆕" if key in st.session_state.ai_updated_keys else ""
         rows.append({
+            "": marker,
             "Group": p["group"],
             "Source": p["source"],
             "Placeholder": f"{{{{{key}}}}}",
