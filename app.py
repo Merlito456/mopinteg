@@ -47,7 +47,6 @@ except ImportError:
         embed_excel_as_package = None
         diagnose_placeholder = None
 
-# ⭐ Dynamic prompt + parser
 from utils.ai_prompt import build_gemini_prompt, parse_ai_response
 
 
@@ -69,9 +68,9 @@ TEMPLATE_PATH = "template/MOP_INTEGRATION_TEMPLATE.docx"
 # ============================================================
 SESSION_DEFAULTS = {
     "placeholder_values": {},
-    "fio_uploaded": False,
+    "fio_uploaded": False,       # tracks whether FIO has been PARSED (not uploaded)
     "fio_fingerprint": None,
-    "ewp_uploaded": False,
+    "ewp_uploaded": False,       # tracks whether EWP has been OCR-parsed (not uploaded)
     "ewp_fingerprint": None,
     "ewp_image_bytes": None,
     "ewp_ocr_text": "",
@@ -83,6 +82,9 @@ SESSION_DEFAULTS = {
     "debug_log": [],
     "ole_debug_log": [],
     "fio_parse_debug": None,
+    # NEW: tracks whether user has explicitly triggered a parse
+    "fio_parse_triggered": False,
+    "ewp_parse_triggered": False,
 }
 
 for key, default in SESSION_DEFAULTS.items():
@@ -111,10 +113,10 @@ def reset_app():
 
 
 def reset_fio_state():
-    """Reset only FIO-related state to force re-parse."""
+    """Reset only FIO-parsed state (not the uploaded bytes)."""
     st.session_state.fio_uploaded = False
     st.session_state.fio_parse_debug = None
-    st.session_state.fio_fingerprint = None
+    st.session_state.fio_parse_triggered = False
 
     for p in PLACEHOLDER_MAP:
         if p["source"] in ("FIO", "EWP"):
@@ -122,12 +124,11 @@ def reset_fio_state():
 
 
 def reset_ewp_state():
-    """Reset only EWP-related state to force re-parse."""
+    """Reset only EWP-parsed state (not the uploaded bytes)."""
     st.session_state.ewp_uploaded = False
-    st.session_state.ewp_image_bytes = None
     st.session_state.ewp_ocr_text = ""
     st.session_state.ewp_candidates = {}
-    st.session_state.ewp_fingerprint = None
+    st.session_state.ewp_parse_triggered = False
 
     for p in PLACEHOLDER_MAP:
         if p["source"] == "EWP":
@@ -276,10 +277,7 @@ def get_value_with_fallback(key, default=""):
 
 
 def build_output_filename():
-    """
-    Build the output filename:
-      MOP_{SITE_NAME}_{OLT_SITE}_{OLT_PRODUCT}_Mini_OLT_Integration_{DATE_PRIMARY}_v{VERSION}.docx
-    """
+    """Build the output filename."""
     sync_all_widgets_to_placeholders()
 
     site_name = get_value_with_fallback("SITE_NAME", "")
@@ -319,154 +317,20 @@ def build_output_filename():
     return "_".join(parts) + ".docx"
 
 
-# ============================================================
-# HEADER
-# ============================================================
-st.title("📄 MOP Automation — Nokia Lightspan MF-2 OLT Integration")
-st.markdown(
-    """
-    Upload the **FIO Excel** and **EWP Image**, verify the mapped values,
-    then generate the filled **MOP Integration Template**.
-
-    The **FIO Excel** is embedded as a Package (Word 2016+ native format)
-    at `{{FIO_REF}}` in Section 13. Double-click the icon to open it in Excel.
-
-    **Fill methods:**
-    1. 📊 **Auto-FIO** — parses values from the FIO Excel
-    2. 🖼️ **Auto-OCR** — extracts values from the EWP image
-    3. 🤖 **AI Paste** — paste Gemini-extracted JSON
-    """
-)
+# ⭐ Parse trigger functions
+def trigger_fio_parse():
+    """Manually trigger FIO parsing."""
+    st.session_state.fio_parse_triggered = True
 
 
-# ============================================================
-# SIDEBAR
-# ============================================================
-with st.sidebar:
-    st.header("⚙️ Configuration")
-
-    st.markdown("### Step 1 — Upload Files")
-    fio_file = st.file_uploader(
-        "Upload FIO (.xlsx)",
-        type=["xlsx"],
-        key="fio_uploader",
-        help="Uploading a new FIO replaces the current session data.",
-    )
-    ewp_image = st.file_uploader(
-        "Upload EWP Image (.jpg/.png)",
-        type=["jpg", "jpeg", "png"],
-        key="ewp_uploader",
-        help="Uploading a new EWP replaces the current session data.",
-    )
-
-    if fio_file:
-        current_fp = file_fingerprint(fio_file)
-        stored_fp = st.session_state.get("fio_fingerprint")
-
-        if current_fp and current_fp != stored_fp:
-            reset_fio_state()
-            st.session_state.fio_fingerprint = current_fp
-            st.info("🔄 New FIO detected — re-parsing...")
-
-        if st.session_state.get("fio_attachment_name") != fio_file.name:
-            try:
-                fio_file.seek(0)
-                fio_bytes = fio_file.read()
-                st.session_state.fio_attachment_bytes = fio_bytes
-                st.session_state.fio_attachment_name = fio_file.name
-                fio_file.seek(0)
-            except Exception as e:
-                st.error(f"❌ Failed to read FIO: {e}")
-
-    if ewp_image:
-        current_fp = file_fingerprint(ewp_image)
-        stored_fp = st.session_state.get("ewp_fingerprint")
-
-        if current_fp and current_fp != stored_fp:
-            reset_ewp_state()
-            st.session_state.ewp_fingerprint = current_fp
-            st.info("🔄 New EWP detected — re-parsing...")
-
-    if st.session_state.get("fio_attachment_bytes"):
-        size_kb = len(st.session_state.fio_attachment_bytes) / 1024
-        st.caption(
-            f"📎 **Attachment ready:** `{st.session_state.fio_attachment_name}` "
-            f"({size_kb:.1f} KB)"
-        )
-
-    with st.expander("⚙️ Advanced — Different file for attachment", expanded=False):
-        st.caption("By default, the FIO above is embedded at `{{FIO_REF}}`.")
-        override_file = st.file_uploader(
-            "Override (.xlsx)",
-            type=["xlsx"],
-            key="fio_attachment_override",
-        )
-        if override_file:
-            try:
-                st.session_state.fio_attachment_bytes = override_file.read()
-                st.session_state.fio_attachment_name = override_file.name
-                st.success(f"✅ Override: {override_file.name}")
-            except Exception as e:
-                st.error(f"❌ Failed: {e}")
-
-    st.markdown("---")
-    st.markdown("### Step 2 — Review & Edit")
-    st.markdown("FIO & EWP values are auto-filled. Verify and edit as needed.")
-
-    st.markdown("---")
-    st.markdown("### Step 3 — Generate MOP")
-    generate_btn = st.button(
-        "🚀 Generate MOP",
-        use_container_width=True,
-        type="primary",
-        key="generate_btn",
-    )
-
-    st.markdown("---")
-    st.markdown("### 🔄 Reload")
-    col_r1, col_r2 = st.columns(2)
-    with col_r1:
-        if st.button("♻️ Re-parse FIO", use_container_width=True, key="reparse_fio_btn"):
-            reset_fio_state()
-            st.success("FIO re-parse triggered")
-            st.rerun()
-    with col_r2:
-        if st.button("♻️ Re-parse EWP", use_container_width=True, key="reparse_ewp_btn"):
-            reset_ewp_state()
-            st.success("EWP re-parse triggered")
-            st.rerun()
-
-    if st.button("🔄 Reset App (Full)", use_container_width=True, key="reset_btn"):
-        reset_app()
-
-    st.markdown("---")
-    st.markdown("### 📌 Status")
-    st.markdown(
-        f"- FIO: {'✅ Loaded' if st.session_state.fio_uploaded else '❌ Not uploaded'}\n"
-        f"- EWP Image: {'✅ Loaded' if st.session_state.ewp_uploaded else '❌ Not uploaded'}\n"
-        f"- FIO Attachment: {'✅ Ready' if st.session_state.fio_attachment_bytes else '❌ None'}\n"
-        f"- Template: {'✅ Found' if os.path.exists(TEMPLATE_PATH) else '❌ Missing'}\n"
-        f"- OCR Engine: {'✅ Available' if EWP_OCR_AVAILABLE else '⚠️ Unavailable'}\n"
-        f"- Package Embed: {'✅ Available' if PACKAGE_EMBED_AVAILABLE else '⚠️ Unavailable'}\n"
-        f"- OLE Embed: {'✅ Available' if OLE_EMBED_AVAILABLE else '⚠️ Unavailable'}"
-    )
-
-    missing_keys = get_missing_keys()
-    if missing_keys:
-        st.markdown("---")
-        st.markdown("### ⚠️ Missing Fields")
-        st.markdown(f"**{len(missing_keys)}** fields still empty")
-
-    if st.session_state.ai_updated_keys:
-        st.markdown("---")
-        st.markdown("### 🆕 AI-Updated")
-        st.markdown(f"**{len(st.session_state.ai_updated_keys)}** fields updated")
+def trigger_ewp_parse():
+    """Manually trigger EWP parsing."""
+    st.session_state.ewp_parse_triggered = True
 
 
-# ============================================================
-# PARSE FIO
-# ============================================================
-if fio_file and not st.session_state.fio_uploaded:
+# ⭐ NEW: Manual parse workers
+def do_parse_fio(fio_file):
+    """Run FIO parsing. Called only when user clicks Parse FIO."""
     with st.spinner("Parsing FIO..."):
         try:
             fio_file.seek(0)
@@ -506,6 +370,7 @@ if fio_file and not st.session_state.fio_uploaded:
                     st.session_state.placeholder_values["FIO_REF"] = name
 
             st.session_state.fio_uploaded = True
+            st.session_state.fio_parse_triggered = False
             clear_widget_caches()
 
             st.success(f"✅ FIO parsed — {len(parsed)} values mapped")
@@ -515,46 +380,193 @@ if fio_file and not st.session_state.fio_uploaded:
             st.exception(e)
 
 
+def do_parse_ewp(ewp_bytes):
+    """Run EWP OCR parsing. Called only when user clicks Parse EWP."""
+    if not EWP_OCR_AVAILABLE:
+        st.warning("⚠️ OCR engine unavailable. Use dropdowns or AI paste.")
+        return
+
+    with st.spinner("🔍 Extracting values from EWP image (OCR)..."):
+        try:
+            candidates = extract_candidates(ewp_bytes)
+            st.session_state.ewp_candidates = candidates
+
+            ewp_parsed = parse_ewp(ewp_bytes)
+            ocr_raw = get_ocr_text(ewp_bytes)
+            st.session_state.ewp_ocr_text = ocr_raw
+
+            applied = 0
+            for k, v in ewp_parsed.items():
+                if not st.session_state.placeholder_values.get(k):
+                    st.session_state.placeholder_values[k] = v
+                    applied += 1
+
+            st.session_state.ewp_uploaded = True
+            st.session_state.ewp_parse_triggered = False
+            clear_widget_caches()
+
+            st.success(
+                f"✅ EWP parsed — {len(ewp_parsed)} values extracted, "
+                f"{applied} applied, {len(candidates)} candidate sets for dropdowns"
+            )
+
+        except Exception as ocr_err:
+            st.warning(f"⚠️ OCR failed: {ocr_err}. Use dropdowns or AI paste.")
+
+
 # ============================================================
-# STORE EWP IMAGE + AUTO-PARSE VIA OCR
+# HEADER
 # ============================================================
-if ewp_image and not st.session_state.ewp_uploaded:
-    try:
-        ewp_image.seek(0)
-        ewp_bytes = ewp_image.read()
-        st.session_state.ewp_image_bytes = ewp_bytes
-        st.session_state.ewp_uploaded = True
+st.title("📄 MOP Automation — Nokia Lightspan MF-2 OLT Integration")
+st.markdown(
+    """
+    Upload the **FIO Excel** and **EWP Image**, click **Parse** to extract values,
+    then generate the filled **MOP Integration Template**.
 
-        if EWP_OCR_AVAILABLE:
-            with st.spinner("🔍 Extracting values from EWP image (OCR)..."):
-                try:
-                    candidates = extract_candidates(ewp_bytes)
-                    st.session_state.ewp_candidates = candidates
+    The **FIO Excel** is embedded as a Package (Word 2016+ native format)
+    at `{{FIO_REF}}` in Section 13. Double-click the icon to open it in Excel.
 
-                    ewp_parsed = parse_ewp(ewp_bytes)
-                    ocr_raw = get_ocr_text(ewp_bytes)
-                    st.session_state.ewp_ocr_text = ocr_raw
+    **Fill methods:**
+    1. 📊 **Parse FIO** — extract values from the FIO Excel (manual button)
+    2. 🖼️ **Parse EWP** — extract values from the EWP image via OCR (manual button)
+    3. 🤖 **AI Paste** — paste Gemini-extracted JSON
+    """
+)
 
-                    applied = 0
-                    for k, v in ewp_parsed.items():
-                        if not st.session_state.placeholder_values.get(k):
-                            st.session_state.placeholder_values[k] = v
-                            applied += 1
 
-                    clear_widget_caches()
+# ============================================================
+# SIDEBAR
+# ============================================================
+with st.sidebar:
+    st.header("⚙️ Configuration")
 
-                    st.success(
-                        f"✅ EWP loaded — {len(ewp_parsed)} values extracted, "
-                        f"{applied} applied, {len(candidates)} candidate sets for dropdowns"
-                    )
+    st.markdown("### Step 1 — Upload Files")
+    fio_file = st.file_uploader(
+        "Upload FIO (.xlsx)",
+        type=["xlsx"],
+        key="fio_uploader",
+        help="Uploading a new FIO replaces the current session data.",
+    )
+    ewp_image = st.file_uploader(
+        "Upload EWP Image (.jpg/.png)",
+        type=["jpg", "jpeg", "png"],
+        key="ewp_uploader",
+        help="Uploading a new EWP replaces the current session data.",
+    )
 
-                except Exception as ocr_err:
-                    st.warning(f"⚠️ OCR failed: {ocr_err}. Use dropdowns or AI paste.")
-        else:
-            st.info("ℹ️ EWP loaded. OCR unavailable — use dropdowns or AI paste.")
-    except Exception as e:
-        st.error(f"❌ Failed to load EWP image: {e}")
-        st.exception(e)
+    # ⭐ Detect NEW file uploads — store bytes + reset parse flags, but DO NOT parse
+    if fio_file:
+        current_fp = file_fingerprint(fio_file)
+        stored_fp = st.session_state.get("fio_fingerprint")
+
+        if current_fp and current_fp != stored_fp:
+            reset_fio_state()
+            st.session_state.fio_fingerprint = current_fp
+            st.info("🆕 New FIO detected — click **Parse FIO** in the FIO tab.")
+
+        if st.session_state.get("fio_attachment_name") != fio_file.name:
+            try:
+                fio_file.seek(0)
+                fio_bytes = fio_file.read()
+                st.session_state.fio_attachment_bytes = fio_bytes
+                st.session_state.fio_attachment_name = fio_file.name
+                fio_file.seek(0)
+            except Exception as e:
+                st.error(f"❌ Failed to read FIO: {e}")
+
+    if ewp_image:
+        current_fp = file_fingerprint(ewp_image)
+        stored_fp = st.session_state.get("ewp_fingerprint")
+
+        if current_fp and current_fp != stored_fp:
+            reset_ewp_state()
+            st.session_state.ewp_fingerprint = current_fp
+            # ⭐ Store image bytes immediately, but DO NOT OCR
+            try:
+                ewp_image.seek(0)
+                st.session_state.ewp_image_bytes = ewp_image.read()
+                ewp_image.seek(0)
+            except Exception as e:
+                st.error(f"❌ Failed to read EWP image: {e}")
+            st.info("🆕 New EWP detected — click **Parse EWP** in the EWP tab.")
+
+    if st.session_state.get("fio_attachment_bytes"):
+        size_kb = len(st.session_state.fio_attachment_bytes) / 1024
+        st.caption(
+            f"📎 **Attachment ready:** `{st.session_state.fio_attachment_name}` "
+            f"({size_kb:.1f} KB)"
+        )
+
+    with st.expander("⚙️ Advanced — Different file for attachment", expanded=False):
+        st.caption("By default, the FIO above is embedded at `{{FIO_REF}}`.")
+        override_file = st.file_uploader(
+            "Override (.xlsx)",
+            type=["xlsx"],
+            key="fio_attachment_override",
+        )
+        if override_file:
+            try:
+                st.session_state.fio_attachment_bytes = override_file.read()
+                st.session_state.fio_attachment_name = override_file.name
+                st.success(f"✅ Override: {override_file.name}")
+            except Exception as e:
+                st.error(f"❌ Failed: {e}")
+
+    st.markdown("---")
+    st.markdown("### Step 2 — Parse & Review")
+    st.markdown(
+        "Click **Parse FIO** / **Parse EWP** inside the tabs, "
+        "then verify and edit as needed."
+    )
+
+    st.markdown("---")
+    st.markdown("### Step 3 — Generate MOP")
+    generate_btn = st.button(
+        "🚀 Generate MOP",
+        use_container_width=True,
+        type="primary",
+        key="generate_btn",
+    )
+
+    st.markdown("---")
+    st.markdown("### 🔄 Reload")
+    col_r1, col_r2 = st.columns(2)
+    with col_r1:
+        if st.button("♻️ Reset FIO", use_container_width=True, key="reparse_fio_btn"):
+            reset_fio_state()
+            st.success("FIO reset — click Parse FIO again.")
+            st.rerun()
+    with col_r2:
+        if st.button("♻️ Reset EWP", use_container_width=True, key="reparse_ewp_btn"):
+            reset_ewp_state()
+            st.success("EWP reset — click Parse EWP again.")
+            st.rerun()
+
+    if st.button("🔄 Reset App (Full)", use_container_width=True, key="reset_btn"):
+        reset_app()
+
+    st.markdown("---")
+    st.markdown("### 📌 Status")
+    st.markdown(
+        f"- FIO: {'✅ Parsed' if st.session_state.fio_uploaded else '⏳ Not parsed'}\n"
+        f"- EWP Image: {'✅ Parsed' if st.session_state.ewp_uploaded else '⏳ Not parsed'}\n"
+        f"- FIO Attachment: {'✅ Ready' if st.session_state.fio_attachment_bytes else '❌ None'}\n"
+        f"- Template: {'✅ Found' if os.path.exists(TEMPLATE_PATH) else '❌ Missing'}\n"
+        f"- OCR Engine: {'✅ Available' if EWP_OCR_AVAILABLE else '⚠️ Unavailable'}\n"
+        f"- Package Embed: {'✅ Available' if PACKAGE_EMBED_AVAILABLE else '⚠️ Unavailable'}\n"
+        f"- OLE Embed: {'✅ Available' if OLE_EMBED_AVAILABLE else '⚠️ Unavailable'}"
+    )
+
+    missing_keys = get_missing_keys()
+    if missing_keys:
+        st.markdown("---")
+        st.markdown("### ⚠️ Missing Fields")
+        st.markdown(f"**{len(missing_keys)}** fields still empty")
+
+    if st.session_state.ai_updated_keys:
+        st.markdown("---")
+        st.markdown("### 🆕 AI-Updated")
+        st.markdown(f"**{len(st.session_state.ai_updated_keys)}** fields updated")
 
 
 # ============================================================
@@ -577,8 +589,31 @@ tab_fio, tab_ewp, tab_ai, tab_doc, tab_preview, tab_generate, tab_ocr, tab_about
 # ============================================================
 with tab_fio:
     st.subheader("FIO-Mapped Placeholders")
-    st.caption("Auto-extracted from FIO. AI Paste and manual edits are reflected here.")
+    st.caption("Values come from FIO parsing. AI Paste and manual edits are reflected here.")
 
+    # ⭐ MANUAL PARSE BUTTON
+    col_parse, col_status = st.columns([1, 3])
+    with col_parse:
+        parse_fio_clicked = st.button(
+            "📊 Parse FIO",
+            use_container_width=True,
+            type="primary",
+            key="parse_fio_btn",
+            disabled=(fio_file is None),
+        )
+    with col_status:
+        if fio_file is None:
+            st.info("ℹ️ Upload FIO Excel in the sidebar first.")
+        elif st.session_state.fio_uploaded:
+            st.success("✅ FIO already parsed. Click **Parse FIO** to re-run.")
+        else:
+            st.warning("⏳ FIO uploaded but not parsed yet. Click **Parse FIO**.")
+
+    if parse_fio_clicked and fio_file is not None:
+        do_parse_fio(fio_file)
+        st.rerun()
+
+    # Debug info
     if st.session_state.get("fio_parse_debug"):
         dbg = st.session_state.fio_parse_debug
         with st.expander(
@@ -602,7 +637,7 @@ with tab_fio:
             st.json(dbg["parsed"])
 
     if not st.session_state.fio_uploaded:
-        st.warning("⚠️ Upload FIO Excel first.")
+        st.warning("⚠️ Upload FIO Excel and click **Parse FIO** to populate these fields.")
     else:
         groups = sorted(set(p["group"] for p in PLACEHOLDER_MAP if p["source"] == "FIO"))
         for group in groups:
@@ -637,62 +672,84 @@ with tab_fio:
 with tab_ewp:
     st.subheader("EWP-Only Placeholders")
     st.caption(
-        "Values are **auto-extracted via OCR**. Where multiple candidates were found, "
+        "Values come from EWP OCR parsing. Where multiple candidates were found, "
         "**pick from the dropdown**. AI Paste also populates these fields. "
         "Defaults are used when OCR misses a value."
     )
 
+    # ⭐ MANUAL PARSE BUTTON
+    col_parse, col_status = st.columns([1, 3])
+    with col_parse:
+        parse_ewp_clicked = st.button(
+            "🖼️ Parse EWP",
+            use_container_width=True,
+            type="primary",
+            key="parse_ewp_btn",
+            disabled=(st.session_state.get("ewp_image_bytes") is None),
+        )
+    with col_status:
+        if st.session_state.get("ewp_image_bytes") is None:
+            st.info("ℹ️ Upload EWP Image in the sidebar first.")
+        elif st.session_state.ewp_uploaded:
+            st.success("✅ EWP already parsed. Click **Parse EWP** to re-run.")
+        else:
+            st.warning("⏳ EWP uploaded but not parsed yet. Click **Parse EWP**.")
+
+    if parse_ewp_clicked and st.session_state.get("ewp_image_bytes"):
+        do_parse_ewp(st.session_state.ewp_image_bytes)
+        st.rerun()
+
     if not st.session_state.ewp_uploaded:
-        st.warning("⚠️ Upload EWP image first.")
+        st.warning("⚠️ Upload EWP image and click **Parse EWP** to populate these fields.")
+    else:
+        groups = sorted(set(p["group"] for p in PLACEHOLDER_MAP if p["source"] == "EWP"))
+        for group in groups:
+            items = [p for p in PLACEHOLDER_MAP if p["source"] == "EWP" and p["group"] == group]
+            with st.expander(f"📁 {group}", expanded=True):
+                cols = st.columns(2)
+                for i, item in enumerate(items):
+                    key, label = item["key"], item["label"]
+                    candidates = st.session_state.ewp_candidates.get(key, [])
+                    default = item.get("default", "")
+                    current = get_value(key) or default
+                    widget_key = f"ewp_{key}"
 
-    groups = sorted(set(p["group"] for p in PLACEHOLDER_MAP if p["source"] == "EWP"))
-    for group in groups:
-        items = [p for p in PLACEHOLDER_MAP if p["source"] == "EWP" and p["group"] == group]
-        with st.expander(f"📁 {group}", expanded=True):
-            cols = st.columns(2)
-            for i, item in enumerate(items):
-                key, label = item["key"], item["label"]
-                candidates = st.session_state.ewp_candidates.get(key, [])
-                default = item.get("default", "")
-                current = get_value(key) or default
-                widget_key = f"ewp_{key}"
+                    sync_widget_state(widget_key, current, default)
 
-                sync_widget_state(widget_key, current, default)
+                    display_label = f"🆕 {label}" if key in st.session_state.ai_updated_keys else label
 
-                display_label = f"🆕 {label}" if key in st.session_state.ai_updated_keys else label
+                    with cols[i % 2]:
+                        if candidates and len(candidates) > 1:
+                            options = ["(none)"] + candidates
+                            try:
+                                default_idx = options.index(current) if current in options else 0
+                            except Exception:
+                                default_idx = 0
 
-                with cols[i % 2]:
-                    if candidates and len(candidates) > 1:
-                        options = ["(none)"] + candidates
-                        try:
-                            default_idx = options.index(current) if current in options else 0
-                        except Exception:
-                            default_idx = 0
+                            if st.session_state.get(widget_key) not in options:
+                                st.session_state[widget_key] = options[default_idx]
 
-                        if st.session_state.get(widget_key) not in options:
-                            st.session_state[widget_key] = options[default_idx]
+                            pick = st.selectbox(
+                                f"{display_label} ({len(candidates)} candidates)",
+                                options=options,
+                                key=widget_key,
+                            )
+                            new_val = "" if pick == "(none)" else pick
+                        else:
+                            hint = candidates[0] if candidates else ""
 
-                        pick = st.selectbox(
-                            f"{display_label} ({len(candidates)} candidates)",
-                            options=options,
-                            key=widget_key,
-                        )
-                        new_val = "" if pick == "(none)" else pick
-                    else:
-                        hint = candidates[0] if candidates else ""
+                            val = st.text_input(
+                                display_label,
+                                key=widget_key,
+                                help=f"OCR: {hint}" if hint else (
+                                    f"Default: {default}" if default else "No OCR match — enter manually"
+                                ),
+                            )
+                            new_val = val
 
-                        val = st.text_input(
-                            display_label,
-                            key=widget_key,
-                            help=f"OCR: {hint}" if hint else (
-                                f"Default: {default}" if default else "No OCR match — enter manually"
-                            ),
-                        )
-                        new_val = val
-
-                    if new_val:
-                        set_value(key, new_val)
-                        st.session_state[f"_last_{widget_key}"] = new_val
+                        if new_val:
+                            set_value(key, new_val)
+                            st.session_state[f"_last_{widget_key}"] = new_val
 
 
 # ============================================================
@@ -707,13 +764,11 @@ with tab_ai:
 
     missing_keys = get_missing_keys()
 
-    # ⭐ Build DYNAMIC prompt with ALL placeholders
     full_prompt = build_gemini_prompt(include_all=True)
 
     st.markdown("### Step 1 — Copy this prompt to Gemini")
 
     if missing_keys:
-        # Build focused prompt for missing fields only
         focused_lines = []
         for p in missing_keys:
             key = p["key"]
@@ -755,7 +810,6 @@ with tab_ai:
             f"✅ All **{len(PLACEHOLDER_MAP)}** placeholders are filled!"
         )
 
-    # Full prompt with ALL placeholders
     with st.expander(
         f"🔍 Show FULL prompt (all {len(PLACEHOLDER_MAP)} placeholders)",
         expanded=False,
@@ -854,8 +908,11 @@ with tab_ai:
             st.session_state.ai_updated_keys = set()
             st.session_state.fio_uploaded = False
             st.session_state.fio_parse_debug = None
+            st.session_state.fio_parse_triggered = False
+            st.session_state.ewp_uploaded = False
+            st.session_state.ewp_parse_triggered = False
             clear_widget_caches()
-            st.success("✅ Cleared all fields. Re-upload FIO to parse again.")
+            st.success("✅ Cleared all fields. Click Parse FIO / Parse EWP to re-run.")
             st.rerun()
 
     with col_y:
@@ -871,9 +928,6 @@ with tab_doc:
     st.subheader("Document Metadata & Fixed Values")
     st.caption("Sensible defaults — editable. AI Paste can override these.")
 
-    # ⭐ CHANGED: Show all fields in the 'Document Metadata' group,
-    #           regardless of source (FIO / DOC / EWP).
-    #           This way SITE_NAME (source=FIO) also appears here.
     meta_groups = sorted(set(
         p["group"] for p in PLACEHOLDER_MAP
         if p["group"] == "Document Metadata"
@@ -897,7 +951,6 @@ with tab_doc:
                 sync_widget_state(widget_key, current, default)
                 display_label = f"🆕 {label}" if key in st.session_state.ai_updated_keys else label
 
-                # Add source tag to help user know where the value comes from
                 src = item.get("source", "")
                 src_tag = f" ({src})" if src else ""
                 display_label = f"{display_label}{src_tag}"
@@ -1264,7 +1317,7 @@ with tab_ocr:
     if not EWP_OCR_AVAILABLE:
         st.warning("⚠️ Tesseract not installed.")
     elif not st.session_state.get("ewp_uploaded"):
-        st.info("ℹ️ Upload EWP image first.")
+        st.info("ℹ️ Upload EWP image and click **Parse EWP** first.")
     else:
         col1, col2 = st.columns([1, 1])
         with col1:
@@ -1342,8 +1395,8 @@ with tab_about:
     st.header("🚀 Features")
     st.markdown(
         """
-        - **📊 Auto-FIO Parsing** — Reads `fio.xlsx`, extracts OLT/AN sites, IPs, VLANs, VSI names, VC IDs, peer IPs, AGG/BNG nodes, and port mappings.
-        - **🖼️ Auto-OCR from EWP** — Tesseract OCR reads the EWP topology image, extracts node names, IPs, and ports with dropdown selection for ambiguous values.
+        - **📊 Manual FIO Parsing** — Click **Parse FIO** to read `fio.xlsx` and extract OLT/AN sites, IPs, VLANs, VSI names, VC IDs, peer IPs, AGG/BNG nodes, and port mappings.
+        - **🖼️ Manual EWP OCR** — Click **Parse EWP** to run Tesseract OCR on the EWP topology image, extract node names, IPs, and ports with dropdown selection for ambiguous values.
         - **🤖 AI-Assisted Extraction** — Paste Gemini's JSON response with a focused prompt for missing fields. Robust parser handles single quotes, markdown fences, trailing commas, and multiple JSON blocks.
         - **📎 Excel Attachment Embedding** — Embeds the FIO `.xlsx` as a Package (Word 2016+ native) with OLE fallback. Double-click the icon to open in Excel.
         - **📄 DOCX Generation** — Replaces 135+ placeholders, inserts EWP image, handles split-run placeholders and Word auto-wrap issues.
@@ -1378,9 +1431,9 @@ with tab_about:
     st.header("🔄 How It Works")
     st.code(
         """
-1. Upload FIO Excel  ─────►  Auto-parse ~65 values
+1. Upload FIO Excel  ─────►  Click "Parse FIO" to extract ~65 values
                              │
-2. Upload EWP Image  ─────►  OCR extract ~35 values
+2. Upload EWP Image  ─────►  Click "Parse EWP" for OCR ~35 values
                              │
 3. (Optional) AI Paste ───►  Fill missing fields via Gemini
                              │
