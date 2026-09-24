@@ -871,9 +871,21 @@ with tab_doc:
     st.subheader("Document Metadata & Fixed Values")
     st.caption("Sensible defaults — editable. AI Paste can override these.")
 
-    groups = sorted(set(p["group"] for p in PLACEHOLDER_MAP if p["source"] == "DOC"))
-    for group in groups:
-        items = [p for p in PLACEHOLDER_MAP if p["source"] == "DOC" and p["group"] == group]
+    # ⭐ CHANGED: Show all fields in the 'Document Metadata' group,
+    #           regardless of source (FIO / DOC / EWP).
+    #           This way SITE_NAME (source=FIO) also appears here.
+    meta_groups = sorted(set(
+        p["group"] for p in PLACEHOLDER_MAP
+        if p["group"] == "Document Metadata"
+    ))
+
+    for group in meta_groups:
+        items = [p for p in PLACEHOLDER_MAP
+                 if p["group"] == group
+                 and p["source"] in ("DOC", "FIO", "EWP")]
+        if not items:
+            continue
+
         with st.expander(f"📁 {group}", expanded=True):
             cols = st.columns(2)
             for i, item in enumerate(items):
@@ -884,6 +896,11 @@ with tab_doc:
 
                 sync_widget_state(widget_key, current, default)
                 display_label = f"🆕 {label}" if key in st.session_state.ai_updated_keys else label
+
+                # Add source tag to help user know where the value comes from
+                src = item.get("source", "")
+                src_tag = f" ({src})" if src else ""
+                display_label = f"{display_label}{src_tag}"
 
                 with cols[i % 2]:
                     val = st.text_input(display_label, key=widget_key)
