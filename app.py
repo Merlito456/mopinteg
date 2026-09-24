@@ -6,6 +6,7 @@ import tempfile
 import os
 import json
 import re
+import hashlib
 import zipfile
 
 from utils.placeholder_map import (
@@ -66,9 +67,11 @@ TEMPLATE_PATH = "template/MOP_INTEGRATION_TEMPLATE.docx"
 # SESSION STATE
 # ============================================================
 SESSION_DEFAULTS = {
-    "placeholder_values": {"SITE_NAME": "LCGCDO"},
+    "placeholder_values": {},
     "fio_uploaded": False,
+    "fio_fingerprint": None,          # ⭐ NEW: tracks current FIO
     "ewp_uploaded": False,
+    "ewp_fingerprint": None,          # ⭐ NEW: tracks current EWP
     "ewp_image_bytes": None,
     "ewp_ocr_text": "",
     "ewp_candidates": {},
@@ -85,9 +88,6 @@ for key, default in SESSION_DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
-# Ensure SITE_NAME default
-if not st.session_state.placeholder_values.get("SITE_NAME"):
-    st.session_state.placeholder_values["SITE_NAME"] = "LCGCDO"
 
 PROTECTED_SESSION_KEYS = set(SESSION_DEFAULTS.keys())
 
@@ -107,6 +107,53 @@ def reset_app():
     for key in list(st.session_state.keys()):
         del st.session_state[key]
     st.rerun()
+
+
+def reset_fio_state():
+    """Reset only FIO-related state to force re-parse."""
+    st.session_state.fio_uploaded = False
+    st.session_state.fio_parse_debug = None
+    st.session_state.fio_fingerprint = None
+    
+    # Clear FIO-sourced placeholder values (keep DOC values)
+    for p in PLACEHOLDER_MAP:
+        if p["source"] == "FIO":
+            st.session_state.placeholder_values.pop(p["key"], None)
+    
+    # Also clear EWP-sourced values that might come from FIO
+    for p in PLACEHOLDER_MAP:
+        if p["source"] == "EWP":
+            st.session_state.placeholder_values.pop(p["key"], None)
+
+
+def reset_ewp_state():
+    """Reset only EWP-related state to force re-parse."""
+    st.session_state.ewp_uploaded = False
+    st.session_state.ewp_image_bytes = None
+    st.session_state.ewp_ocr_text = ""
+    st.session_state.ewp_candidates = {}
+    st.session_state.ewp_fingerprint = None
+    
+    # Clear EWP-sourced placeholder values (keep FIO & DOC values)
+    for p in PLACEHOLDER_MAP:
+        if p["source"] == "EWP":
+            st.session_state.placeholder_values.pop(p["key"], None)
+
+
+def file_fingerprint(file_obj):
+    """Generate a unique fingerprint for an uploaded file."""
+    if file_obj is None:
+        return None
+    try:
+        # Read bytes for hashing
+        file_obj.seek(0)
+        data = file_obj.read()
+        file_obj.seek(0)
+        # Use name + size + first/last bytes as a lightweight fingerprint
+        fp = f"{file_obj.name}::{len(data)}::{hashlib.md5(data[:1024]).hexdigest()[:8]}"
+        return fp
+    except Exception:
+        return None
 
 
 def clear_widget_caches():
@@ -199,18 +246,13 @@ def check_placeholder_in_docx(docx_path, placeholder):
 
 
 def sync_all_widgets_to_placeholders():
-    """
-    Sync widget state (doc_*, fio_*, ewp_*) into placeholder_values.
-    Ensures all currently-rendered widgets contribute their values.
-    """
+    """Sync widget state (doc_*, fio_*, ewp_*) into placeholder_values."""
     for p in PLACEHOLDER_MAP:
         key = p["key"]
 
-        # Skip if already set in placeholder_values
         if st.session_state.placeholder_values.get(key):
             continue
 
-        # Try widget state — check prefixed keys
         for prefix in ("doc_", "fio_", "ewp_"):
             widget_key = f"{prefix}{key}"
             if widget_key in st.session_state:
@@ -221,21 +263,16 @@ def sync_all_widgets_to_placeholders():
 
 
 def get_value_with_fallback(key, default=""):
-    """
-    Read from placeholder_values, then widget state, then PLACEHOLDER_MAP default.
-    """
-    # 1. Try placeholder_values
+    """Read from placeholder_values, then widget state, then PLACEHOLDER_MAP default."""
     val = st.session_state.placeholder_values.get(key, "")
     if val:
         return val
 
-    # 2. Try widget state
     for prefix in ("doc_", "fio_", "ewp_"):
         widget_val = st.session_state.get(f"{prefix}{key}", "")
         if widget_val:
             return widget_val
 
-    # 3. Try PLACEHOLDER_MAP default
     for p in PLACEHOLDER_MAP:
         if p["key"] == key:
             default_val = p.get("default", "")
@@ -243,7 +280,6 @@ def get_value_with_fallback(key, default=""):
                 return default_val
             break
 
-    # 4. Return provided default
     return default
 
 
@@ -251,14 +287,18 @@ def build_output_filename():
     """
     Build the output filename:
       MOP_{SITE_NAME}_{OLT_SITE}_{OLT_PRODUCT}_Mini_OLT_Integration_{DATE_PRIMARY}_v{VERSION}.docx
-
-    Example:
-      MOP_LCGCDO_CDO_013_GPONA_02_MF-2_Mini_OLT_Integration_July 31_v1.1.docx
     """
-    # Sync widget state first to catch any user edits
     sync_all_widgets_to_placeholders()
 
-    site_name = get_value_with_fallback("SITE_NAME", "LCGCDO")
+    # Site name — derived from AN_SITE prefix if not explicitly set
+    site_name = get_value_with_fallback("SITE_NAME", "")
+    if not site_name:
+        an_site = get_value_with_fallback("AN_SITE", "")
+        if an_site:
+            site_name = re.split(r"[_\-]", an_site)[0].strip()
+    if not site_name:
+        site_name = "SITE"
+
     olt_site = get_value_with_fallback("OLT_SITE", "OLT_SITE")
     olt_product = get_value_with_fallback("OLT_PRODUCT", "MF-2")
     date_primary = get_value_with_fallback("DATE_PRIMARY", "TBD")
@@ -271,7 +311,6 @@ def build_output_filename():
         s = re.sub(r"\s+", " ", s)
         return s.strip()
 
-    # Strip ", YYYY" from the date for a shorter filename
     date_short = re.sub(r",\s*\d{4}$", "", date_primary)
 
     parts = [
@@ -320,24 +359,47 @@ with st.sidebar:
         "Upload FIO (.xlsx)",
         type=["xlsx"],
         key="fio_uploader",
-        help="Used for both auto-parsing values AND embedding at {{FIO_REF}}.",
+        help="Uploading a new FIO replaces the current session data.",
     )
     ewp_image = st.file_uploader(
         "Upload EWP Image (.jpg/.png)",
         type=["jpg", "jpeg", "png"],
         key="ewp_uploader",
-        help="Used for OCR extraction and inserted into Section 9.",
+        help="Uploading a new EWP replaces the current session data.",
     )
 
+    # ⭐ FIO FINGERPRINT DETECTION — auto-reset when FIO changes
     if fio_file:
+        current_fp = file_fingerprint(fio_file)
+        stored_fp = st.session_state.get("fio_fingerprint")
+
+        if current_fp and current_fp != stored_fp:
+            # FIO changed → reset FIO state and store new fingerprint
+            reset_fio_state()
+            st.session_state.fio_fingerprint = current_fp
+            st.info("🔄 New FIO detected — re-parsing...")
+
+        # Store FIO bytes for attachment
         if st.session_state.get("fio_attachment_name") != fio_file.name:
             try:
+                fio_file.seek(0)
                 fio_bytes = fio_file.read()
                 st.session_state.fio_attachment_bytes = fio_bytes
                 st.session_state.fio_attachment_name = fio_file.name
                 fio_file.seek(0)
             except Exception as e:
                 st.error(f"❌ Failed to read FIO: {e}")
+
+    # ⭐ EWP FINGERPRINT DETECTION — auto-reset when EWP changes
+    if ewp_image:
+        current_fp = file_fingerprint(ewp_image)
+        stored_fp = st.session_state.get("ewp_fingerprint")
+
+        if current_fp and current_fp != stored_fp:
+            # EWP changed → reset EWP state and store new fingerprint
+            reset_ewp_state()
+            st.session_state.ewp_fingerprint = current_fp
+            st.info("🔄 New EWP detected — re-parsing...")
 
     if st.session_state.get("fio_attachment_bytes"):
         size_kb = len(st.session_state.fio_attachment_bytes) / 1024
@@ -375,7 +437,20 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    if st.button("🔄 Reset App", use_container_width=True, key="reset_btn"):
+    st.markdown("### 🔄 Reload")
+    col_r1, col_r2 = st.columns(2)
+    with col_r1:
+        if st.button("♻️ Re-parse FIO", use_container_width=True, key="reparse_fio_btn"):
+            reset_fio_state()
+            st.success("FIO re-parse triggered")
+            st.rerun()
+    with col_r2:
+        if st.button("♻️ Re-parse EWP", use_container_width=True, key="reparse_ewp_btn"):
+            reset_ewp_state()
+            st.success("EWP re-parse triggered")
+            st.rerun()
+
+    if st.button("🔄 Reset App (Full)", use_container_width=True, key="reset_btn"):
         reset_app()
 
     st.markdown("---")
@@ -403,7 +478,7 @@ with st.sidebar:
 
 
 # ============================================================
-# PARSE FIO
+# PARSE FIO — runs when fingerprint changed OR first upload
 # ============================================================
 if fio_file and not st.session_state.fio_uploaded:
     with st.spinner("Parsing FIO..."):
@@ -425,7 +500,7 @@ if fio_file and not st.session_state.fio_uploaded:
                 "VCID_IPOE1_PRIMARY", "VCID_IPOE2_PRIMARY",
                 "VCID_OM_SECONDARY", "VCID_SIP_SECONDARY", "VCID_HSI_SECONDARY",
                 "VCID_IPOE1_SECONDARY", "VCID_IPOE2_SECONDARY",
-                "FIO_REF", "OLT_REGION", "CABINET_NAME",
+                "FIO_REF", "OLT_REGION", "CABINET_NAME", "SITE_NAME",
             ]
             missing_from_parse = [k for k in expected_keys if k not in parsed]
 
@@ -436,13 +511,14 @@ if fio_file and not st.session_state.fio_uploaded:
                 "expected_count": len(expected_keys),
             }
 
+            # ⭐ OVERWRITE existing placeholder_values (don't setdefault)
             for k, v in parsed.items():
-                set_value(k, v)
+                st.session_state.placeholder_values[k] = v
 
             if not parsed.get("FIO_REF"):
                 if st.session_state.get("fio_attachment_name"):
                     name = os.path.splitext(st.session_state.fio_attachment_name)[0]
-                    set_value("FIO_REF", name)
+                    st.session_state.placeholder_values["FIO_REF"] = name
 
             st.session_state.fio_uploaded = True
             clear_widget_caches()
@@ -459,6 +535,7 @@ if fio_file and not st.session_state.fio_uploaded:
 # ============================================================
 if ewp_image and not st.session_state.ewp_uploaded:
     try:
+        ewp_image.seek(0)
         ewp_bytes = ewp_image.read()
         st.session_state.ewp_image_bytes = ewp_bytes
         st.session_state.ewp_uploaded = True
@@ -475,8 +552,9 @@ if ewp_image and not st.session_state.ewp_uploaded:
 
                     applied = 0
                     for k, v in ewp_parsed.items():
-                        if not get_value(k):
-                            set_value(k, v)
+                        # ⭐ OVERWRITE existing values (FIO takes precedence via parse order, but EWP fills gaps)
+                        if not st.session_state.placeholder_values.get(k):
+                            st.session_state.placeholder_values[k] = v
                             applied += 1
 
                     clear_widget_caches()
@@ -564,7 +642,6 @@ with tab_fio:
 
                     with cols[i % 2]:
                         val = st.text_input(display_label, key=widget_key, help=help_text)
-                        # ⭐ Always sync non-empty values
                         if val:
                             set_value(key, val)
                             st.session_state[f"_last_{widget_key}"] = val
@@ -629,7 +706,6 @@ with tab_ewp:
                         )
                         new_val = val
 
-                    # ⭐ Always sync non-empty values
                     if new_val:
                         set_value(key, new_val)
                         st.session_state[f"_last_{widget_key}"] = new_val
@@ -762,10 +838,12 @@ with tab_ai:
 
     with col_x:
         if st.button("🧹 Clear All Fields", use_container_width=True, key="clear_all_btn"):
-            st.session_state.placeholder_values = {"SITE_NAME": "LCGCDO"}
+            st.session_state.placeholder_values = {}
             st.session_state.ai_updated_keys = set()
+            st.session_state.fio_uploaded = False
+            st.session_state.fio_parse_debug = None
             clear_widget_caches()
-            st.success("✅ Cleared all fields.")
+            st.success("✅ Cleared all fields. Re-upload FIO to parse again.")
             st.rerun()
 
     with col_y:
@@ -797,7 +875,6 @@ with tab_doc:
 
                 with cols[i % 2]:
                     val = st.text_input(display_label, key=widget_key)
-                    # ⭐ Always sync non-empty values back to placeholder_values
                     if val:
                         set_value(key, val)
                     st.session_state[f"_last_{widget_key}"] = val
@@ -809,7 +886,6 @@ with tab_doc:
 with tab_preview:
     st.subheader("Preview — All Placeholder Values")
 
-    # Output filename preview
     st.markdown("### 📄 Output Filename Preview")
     st.code(build_output_filename(), language="text")
 
@@ -868,7 +944,6 @@ with tab_generate:
     else:
         st.success("✅ Ready to generate.")
 
-        # ⭐ Output filename preview
         st.markdown("#### 📄 Output Filename")
         st.code(build_output_filename(), language="text")
 
@@ -954,10 +1029,6 @@ with tab_generate:
                         val = get_value_with_fallback(key, p.get("default", ""))
                         if val:
                             mapping[key] = val
-
-                    # Ensure SITE_NAME is in mapping
-                    if "SITE_NAME" not in mapping:
-                        mapping["SITE_NAME"] = get_value_with_fallback("SITE_NAME", "LCGCDO")
 
                     st.session_state.debug_log.append(
                         f"Mapping keys: **{len(mapping)}**"
@@ -1055,7 +1126,6 @@ with tab_generate:
                     with open(final_path, "rb") as f:
                         output_bytes = f.read()
 
-                    # ⭐ USE CUSTOM FILENAME
                     output_filename = build_output_filename()
 
                     st.session_state.generated_file = {
