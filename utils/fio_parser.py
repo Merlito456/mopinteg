@@ -1,10 +1,13 @@
 """
 Parse the FIO Excel file and extract values mapped to placeholders.
 
-FULLY GENERIC — no hardcoded values. Extracts by:
+FULLY GENERIC — no hardcoded site-specific values. Extracts by:
 - Labels (e.g., "OM VLAN", "NETWORK IP", "GATEWAY")
 - Patterns (e.g., IP addresses, VLAN numbers, node names)
 - Structure (e.g., "AG-HOMING 1" / "AG-HOMING 2" labels)
+
+Only FIXED product/hardware defaults remain (e.g., OLT_PRODUCT = "MF-2").
+Site-specific values (IPs, VLANs, VC IDs, node names) come only from FIO.
 """
 import re
 from openpyxl import load_workbook
@@ -31,44 +34,17 @@ def _is_ip_or_cidr(s):
 
 
 def _find_value_after_label(rows, label_patterns, max_lookahead=6):
-    """
-    Search rows for a cell matching any label pattern, then return the next
-    non-empty cell value (looking rightward in the same row).
-    """
+    """Search rows for a cell matching any label pattern, then return next non-empty."""
     for row in rows:
         for i, cell in enumerate(row):
             cell_s = _s(cell)
             for pattern in label_patterns:
                 if re.search(pattern, cell_s, re.IGNORECASE):
-                    # Look rightward for the next non-empty cell
                     for j in range(i + 1, min(i + 1 + max_lookahead, len(row))):
                         val = row[j]
                         if val is not None and _s(val):
                             return _s(val)
     return None
-
-
-def _find_all_ip_like(rows, exclude=None):
-    """Return all IP-like strings found in the sheet."""
-    exclude = exclude or set()
-    ips = []
-    for row in rows:
-        for cell in row:
-            v = _s(cell)
-            if _is_ip(v) and v not in exclude and v not in ips:
-                ips.append(v)
-    return ips
-
-
-def _find_all_cidr(rows):
-    """Return all CIDR strings found in the sheet."""
-    cidrs = []
-    for row in rows:
-        for cell in row:
-            v = _s(cell)
-            if _is_ip_or_cidr(v) and "/" in v and v not in cidrs:
-                cidrs.append(v)
-    return cidrs
 
 
 # ============================================================
@@ -107,6 +83,8 @@ def parse_fio(file) -> dict:
                 if m:
                     result["OLT_SITE"] = m.group(1).strip()
                     break
+            if result.get("OLT_SITE"):
+                break
 
         # ------------------------------------------------
         # AN SITE — flexible pattern
@@ -135,8 +113,7 @@ def parse_fio(file) -> dict:
                 result["SITE_NAME"] = parts[0].strip()
 
         # ------------------------------------------------
-        # AN Product & Family (from AN_SITE line or nearby)
-        # Look for "ATN 980C", "CX600-X8(V8)", etc.
+        # AN Product & AG Model (from AN_SITE line or nearby)
         # ------------------------------------------------
         for row in rows:
             for cell in row:
@@ -149,7 +126,7 @@ def parse_fio(file) -> dict:
                     result["AG_MODEL"] = m.group(0)
 
         # ------------------------------------------------
-        # AN Trunk ID — "eth-trunk3", "Eth-Trunk5", etc.
+        # AN Trunk ID
         # ------------------------------------------------
         for row in rows:
             for cell in row:
@@ -162,7 +139,7 @@ def parse_fio(file) -> dict:
                 break
 
         # ------------------------------------------------
-        # AN Uplink Port — "GigabitEthernet0/3/1" or "GE0/4/2"
+        # AN Uplink Port
         # ------------------------------------------------
         for row in rows:
             for cell in row:
@@ -179,17 +156,9 @@ def parse_fio(file) -> dict:
                 break
 
         # ------------------------------------------------
-        # AG Nodes — look for "AG-HOMING 1" and "AG-HOMING 2"
-        # The AG node value is typically found nearby the label.
+        # AG Nodes — from "AG-HOMING 1" / "AG-HOMING 2" labels
         # ------------------------------------------------
-        # Strategy: find the row that contains "AG-HOMING 1" and "AG-HOMING 2".
-        # The node names are usually in the header row above or the rows below.
-        # Alternative: scan all node-like cells and pick the two closest to these labels.
-
-        # Find all node-like strings in the sheet
-        node_pattern = re.compile(
-            r"[A-Z][A-Z0-9]+(?:[-_][A-Z0-9]+)+"
-        )
+        node_pattern = re.compile(r"[A-Z][A-Z0-9]+(?:[-_][A-Z0-9]+)+")
         all_nodes = []
         for row in rows:
             for cell in row:
@@ -198,20 +167,18 @@ def parse_fio(file) -> dict:
                     if cell_s not in all_nodes:
                         all_nodes.append(cell_s)
 
-        # Filter out known non-node strings
         exclude_tokens = [
             "FACILITY", "IMPLEMENTATION", "ORDER", "JUNCTION", "SCHEDULE",
             "EXISTING", "TRAIL", "FMC", "CHANNEL", "ASSIGNMENT",
             "CLIENT", "LABEL", "REMARKS", "PROVISIONED",
             "NETWORK", "SUBNET", "MASK", "GATEWAY", "VLAN",
-            "Virtual-Ethernet", "Virtual-Ethernet",
+            "Virtual-Ethernet",
         ]
         candidate_nodes = [
             n for n in all_nodes
             if not any(tok.upper() in n.upper() for tok in exclude_tokens)
         ]
 
-        # Look for "AG-HOMING" labels and grab the nearest node-like cell
         ag_homing_positions = []
         for r_idx, row in enumerate(rows):
             for c_idx, cell in enumerate(row):
@@ -221,7 +188,6 @@ def parse_fio(file) -> dict:
                 elif re.search(r"AG[-_ ]?HOMING\s*2", cell_s, re.IGNORECASE):
                     ag_homing_positions.append((2, r_idx, c_idx))
 
-        # For each AG-HOMING label, find the nearest node-like cell
         for ag_num, r_idx, c_idx in ag_homing_positions:
             nearest = None
             nearest_dist = 999
@@ -229,7 +195,6 @@ def parse_fio(file) -> dict:
                 for cell2_idx, cell2 in enumerate(row2):
                     cell2_s = _s(cell2)
                     if cell2_s in candidate_nodes:
-                        # Distance = row distance + small column factor
                         dist = abs(row2_idx - r_idx) * 10 + abs(cell2_idx - c_idx) * 0.1
                         if dist < nearest_dist:
                             nearest_dist = dist
@@ -240,45 +205,31 @@ def parse_fio(file) -> dict:
                 else:
                     result["AG2_NODE"] = nearest
 
-        # Fallback: if AG nodes still not found, use first two candidates
         if not result.get("AG1_NODE") and len(candidate_nodes) > 0:
             result["AG1_NODE"] = candidate_nodes[0]
         if not result.get("AG2_NODE") and len(candidate_nodes) > 1:
             result["AG2_NODE"] = candidate_nodes[1]
 
         # ------------------------------------------------
-        # Management table: VLAN, IP block, Gateway, OLT Mgmt IP
-        # Rows are labeled "OM VLAN", "NETWORK IP", "GATEWAY", "IP block"
+        # OM VLAN / DHCP block / Gateway
         # ------------------------------------------------
-        # Find the section with "NETWORK IP" + "GATEWAY" + "OM VLAN"
-        # Then read the next data row.
-
-        # Scan every row for these labels
         for r_idx, row in enumerate(rows):
             row_text = " ".join(_s(c) for c in row)
             if re.search(r"NETWORK\s*IP", row_text, re.IGNORECASE) and \
                re.search(r"GATEWAY", row_text, re.IGNORECASE) and \
                re.search(r"OM\s*VLAN|VLAN", row_text, re.IGNORECASE):
-                # Found header row. Now find the data row (r_idx+1 .. r_idx+5)
                 for dr in range(r_idx + 1, min(r_idx + 6, len(rows))):
                     data_row = rows[dr]
                     for cell in data_row:
                         cell_s = _s(cell)
-                        # Network IP (CIDR block)
-                        if _is_ip(cell_s) and not result.get("OLT_MGMT_IP"):
-                            # Could be mgmt IP; but we'll pick the first
-                            pass
                         if _is_ip_or_cidr(cell_s) and "/" in cell_s and not result.get("DHCP_BLOCK_OM"):
-                            # CIDR block
                             result["DHCP_BLOCK_OM"] = cell_s
-                    # Find gateway & OM VLAN in the same data row
                     for cell in data_row:
                         cell_s = _s(cell)
                         if _is_ip(cell_s) and not result.get("OLT_OM_GW"):
                             result["OLT_OM_GW"] = cell_s
                             result["DHCP_GW_OM"] = cell_s
                         if re.match(r"^\d{1,4}(\.0)?$", cell_s) and not result.get("OLT_OM_VLAN"):
-                            # VLAN is typically 2-4 digits (or like "733.0")
                             vlan_num = cell_s.replace(".0", "")
                             if 1 <= int(vlan_num) <= 4095:
                                 result["OLT_OM_VLAN"] = vlan_num
@@ -288,15 +239,14 @@ def parse_fio(file) -> dict:
                 break
 
         # ------------------------------------------------
-        # OLT Management IP — usually in the site info table at bottom
-        # Row: "Cabinet Name | IP Address | ..."
+        # OLT Management IP — from "IP Address" labeled row
         # ------------------------------------------------
         for row in rows:
             for i, cell in enumerate(row):
                 cell_s = _s(cell)
                 if re.search(r"IP\s*Address", cell_s, re.IGNORECASE):
-                    # Look at next non-empty IP in same row or next rows
-                    for dr in [row] + (rows[rows.index(row) + 1:rows.index(row) + 4] if row in rows else []):
+                    # Look at next non-empty IP in same row or next 3 rows
+                    for dr_idx, dr in enumerate([row] + rows[rows.index(row) + 1:rows.index(row) + 4]):
                         for c in dr:
                             c_s = _s(c)
                             if _is_ip(c_s) and not result.get("OLT_MGMT_IP"):
@@ -305,22 +255,10 @@ def parse_fio(file) -> dict:
                         if result.get("OLT_MGMT_IP"):
                             break
 
-        # Fallback: find first IP in the range 10.168.196.x
-        if not result.get("OLT_MGMT_IP"):
-            for row in rows:
-                for cell in row:
-                    c_s = _s(cell)
-                    if re.match(r"^10\.168\.196\.\d+$", c_s) and not result.get("OLT_MGMT_IP"):
-                        result["OLT_MGMT_IP"] = c_s
-                        break
-
         # ------------------------------------------------
-        # SIP VLAN / HSI VLAN (PPPoE) / IPoE VLANs
-        # They appear in their own sub-tables (look for their labels)
+        # VOICE VLAN (SIP)
         # ------------------------------------------------
-        # VOICE VLAN
         val = _find_value_after_label(rows, [r"VOICE\s*VLAN"], max_lookahead=10)
-        # Sometimes the value is in the row below the label
         if not val:
             for r_idx, row in enumerate(rows):
                 for i, cell in enumerate(row):
@@ -336,7 +274,9 @@ def parse_fio(file) -> dict:
         if val:
             result["VLAN_SIP"] = val
 
-        # DATA VLAN (PPPoE)
+        # ------------------------------------------------
+        # DATA VLAN (PPPoE) — HSI
+        # ------------------------------------------------
         for r_idx, row in enumerate(rows):
             for i, cell in enumerate(row):
                 if re.search(r"DATA\s*VLAN\s*\(PPPoE\)", _s(cell), re.IGNORECASE):
@@ -349,11 +289,12 @@ def parse_fio(file) -> dict:
                         if result.get("VLAN_HSI"):
                             break
 
-        # IPoE VLAN (dynamic and static)
+        # ------------------------------------------------
+        # DATA VLAN (IPoE) — dynamic + static
+        # ------------------------------------------------
         for r_idx, row in enumerate(rows):
             for i, cell in enumerate(row):
                 if re.search(r"DATA\s*VLAN\s*\(IPoE\)", _s(cell), re.IGNORECASE):
-                    # Search the sub-table for "DYNAMIC" and "STATIC" values
                     for dr in range(r_idx, min(r_idx + 8, len(rows))):
                         sub_row_text = " ".join(_s(c) for c in rows[dr])
                         for c in rows[dr]:
@@ -379,14 +320,13 @@ def parse_fio(file) -> dict:
                 break
 
         # ------------------------------------------------
-        # CX600 VE ports (from "Virtual-EthernetX/Y/Z" strings)
+        # CX600 VE ports
         # ------------------------------------------------
         for row in rows:
             for cell in row:
                 c_s = _s(cell)
                 for m in re.finditer(r"Virtual[- ]Ethernet\s*(\d+)\s*/\s*(\d+)\s*/\s*(\d+)", c_s, re.IGNORECASE):
                     port = f"{m.group(1)}/{m.group(2)}/{m.group(3)}"
-                    # Heuristic: ports starting with "1" are L2/L3, "3" are OM
                     if port.startswith("1/0/0"):
                         result.setdefault("CX600_VE_L2", port)
                     elif port.startswith("1/0/1"):
@@ -397,7 +337,7 @@ def parse_fio(file) -> dict:
                         result.setdefault("CX600_VE_L3", port)
 
         # ------------------------------------------------
-        # CX600 Uplink Port — "100GE1/1/16"
+        # CX600 Uplink Port
         # ------------------------------------------------
         for row in rows:
             for cell in row:
@@ -410,58 +350,46 @@ def parse_fio(file) -> dict:
                 break
 
     # ============================================================
-    # LOGS_CONFIGURATION — VC IDs, VSI names, peer IPs
+    # LOGS_CONFIGURATION
     # ============================================================
     if "LOGS_CONFIGURATION" in wb.sheetnames:
         ws = wb["LOGS_CONFIGURATION"]
         rows = list(ws.iter_rows(values_only=True))
 
-        # Collect all text in the sheet
         all_text = " ".join(_s(c) for row in rows for c in row)
 
-        # ------------------------------------------------
-        # CX600 Node — look for CX600-X8(V8) node names near AN site
-        # Any node name ending in the AG homing pattern
-        # ------------------------------------------------
-        # Reuse AG1_NODE-derived CX600_NODE
+        # CX600 Node — same as AG1 (or first AG node)
         if result.get("AG1_NODE"):
             result.setdefault("CX600_NODE", result["AG1_NODE"])
 
         # ------------------------------------------------
-        # VSI names — pattern like "OM-80000733", "SIP-90003098"
+        # VSI names
         # ------------------------------------------------
-        vsi_patterns = {
-            "VSI_OM": r"\bOM-\d{6,}\b",
-            "VSI_SIP": r"\bSIP-\d{6,}\b",
-            "VSI_HSI": r"\bHSI-\d{6,}\b",
-            "VSI_IPOE1": r"\bIPOE-\d{6,}\b",
-            "VSI_IPOE2": r"\bIPOE-\d{6,}\b",
-        }
-        # For IPoE, distinguish dynamic vs static by position (1st vs 2nd)
+        # IPoE — dynamic vs static by order of appearance
         ipoe_matches = re.findall(r"\bIPOE-\d{6,}\b", all_text)
         if ipoe_matches:
-            # Deduplicate preserving order
             unique_ipoe = list(dict.fromkeys(ipoe_matches))
             if len(unique_ipoe) >= 1:
                 result["VSI_IPOE1"] = unique_ipoe[0]
             if len(unique_ipoe) >= 2:
                 result["VSI_IPOE2"] = unique_ipoe[1]
 
-        for key, pattern in vsi_patterns.items():
-            if key.startswith("VSI_IPOE"):
-                continue
+        # Others
+        for key, pattern in [
+            ("VSI_OM", r"\bOM-\d{6,}\b"),
+            ("VSI_SIP", r"\bSIP-\d{6,}\b"),
+            ("VSI_HSI", r"\bHSI-\d{6,}\b"),
+        ]:
             m = re.search(pattern, all_text)
             if m:
                 result[key] = m.group(0)
 
         # ------------------------------------------------
-        # VC IDs — pattern "negotiation-vc-id NNNNNNNN"
+        # VC IDs
         # ------------------------------------------------
-        # Map: OM = first pair, SIP = second, HSI = third, IPoE1 = fourth, IPoE2 = fifth
         vc_matches = re.findall(r"negotiation-vc-id\s+(\d{6,})", all_text)
         unique_vc = list(dict.fromkeys(vc_matches))
 
-        # Split into primary / secondary pairs (assume even/odd or by context)
         if len(unique_vc) >= 10:
             result["VCID_OM_PRIMARY"] = unique_vc[0]
             result["VCID_OM_SECONDARY"] = unique_vc[1]
@@ -478,23 +406,18 @@ def parse_fio(file) -> dict:
             result["VCID_OM_SECONDARY"] = unique_vc[1]
 
         # ------------------------------------------------
-        # AN Loopback IPs — from the AN site header
-        # Format: "SITENAME (L0_IP)" and "L1: L1_IP"
+        # AN Loopback IPs
         # ------------------------------------------------
-        # Look for the AN site node with IP in parentheses
         if result.get("AN_SITE"):
             an_site_short = result["AN_SITE"]
-            # Find the row with the AN site
             for row in rows:
                 for cell in row:
                     c_s = _s(cell)
                     if an_site_short in c_s:
-                        # Extract L0 IP from "(IP)"
                         m = re.search(r"\((\d+\.\d+\.\d+\.\d+)\)", c_s)
                         if m and not result.get("AN_LOOPBACK0"):
                             result["AN_LOOPBACK0"] = m.group(1)
 
-            # Find "L1: <IP>" near the AN site reference
             for row in rows:
                 for cell in row:
                     c_s = _s(cell)
@@ -503,33 +426,23 @@ def parse_fio(file) -> dict:
                         result["AN_LOOPBACK1"] = m.group(1)
 
         # ------------------------------------------------
-        # AG1/AG2 IPs — from AG node headers
-        # Each row starts with "AG_NODE (AG_IP)"
+        # AG1/AG2 IPs
         # ------------------------------------------------
-        if result.get("AG1_NODE"):
-            an_site_short = result["AG1_NODE"]
+        for ag_key in ["AG1", "AG2"]:
+            ag_node = result.get(f"{ag_key}_NODE")
+            if not ag_node:
+                continue
             for row in rows:
                 for cell in row:
                     c_s = _s(cell)
-                    if an_site_short in c_s:
+                    if ag_node in c_s:
                         m = re.search(r"\((\d+\.\d+\.\d+\.\d+)\)", c_s)
-                        if m and not result.get("AG1_IP"):
-                            result["AG1_IP"] = m.group(1)
-
-        if result.get("AG2_NODE"):
-            an_site_short = result["AG2_NODE"]
-            for row in rows:
-                for cell in row:
-                    c_s = _s(cell)
-                    if an_site_short in c_s:
-                        m = re.search(r"\((\d+\.\d+\.\d+\.\d+)\)", c_s)
-                        if m and not result.get("AG2_IP"):
-                            result["AG2_IP"] = m.group(1)
+                        if m and not result.get(f"{ag_key}_IP"):
+                            result[f"{ag_key}_IP"] = m.group(1)
 
         # AG Loopbacks (L0, L1)
-        for idx, ag_key in enumerate(["AG1", "AG2"], start=1):
+        for ag_key in ["AG1", "AG2"]:
             if result.get(f"{ag_key}_IP"):
-                # Look for "L0: IP" and "L1: IP"
                 for row in rows:
                     for cell in row:
                         c_s = _s(cell)
@@ -541,7 +454,7 @@ def parse_fio(file) -> dict:
                             result[f"{ag_key}_LOOPBACK1"] = m.group(1)
 
         # ------------------------------------------------
-        # BNG peer IPs — labeled "OM:", "SIP:", "HSI", "IPoE - DST:", "IPoE - STATIC:"
+        # BNG peer IPs — by label
         # ------------------------------------------------
         label_map = {
             "BNG_PEER_OM": r"OM\s*:",
@@ -572,7 +485,6 @@ def parse_fio(file) -> dict:
                 c_s = _s(cell)
                 for key, lbl_pat in label_map_nodes.items():
                     if re.search(lbl_pat, c_s, re.IGNORECASE) and not result.get(key):
-                        # Extract node name before "("
                         m = re.match(r"^(?:[A-Za-z0-9_\-]+\s*:)?\s*([A-Z0-9_\-]+)\s*\(([\d\.]+)\)", c_s)
                         if m:
                             result[key] = m.group(1)
@@ -594,14 +506,13 @@ def parse_fio(file) -> dict:
     # ============================================================
     # FINAL DERIVATIONS
     # ============================================================
-    # SITE_NAME from AN_SITE (in case not set)
     if not result.get("SITE_NAME") and result.get("AN_SITE"):
         parts = re.split(r"[_\-]", result["AN_SITE"])
         if parts:
             result["SITE_NAME"] = parts[0].strip()
 
-    # Site-based defaults for DOC-scope fields (non-FIO sourced)
-    # These are the only "safe" defaults — other missing fields remain empty.
+    # ⭐ FIXED HARDWARE / PRODUCT DEFAULTS ONLY (non-site-specific)
+    # These are safe because they never change between MOPs.
     result.setdefault("OLT_PRODUCT", "MF-2")
     result.setdefault("OLT_PRODUCT_SHORT", "MF-2")
     result.setdefault("AN_PRODUCT_FAMILY", "ATN Series Equipment")
@@ -613,8 +524,8 @@ def parse_fio(file) -> dict:
     result.setdefault("E2E_SYSTEM_3", "ATN 980C")
     result.setdefault("OLT_LAG_ID", "10")
     result.setdefault("OLT_UPLINK_PORT", "1/1/1")
-    result.setdefault("OLT_SW_VERSION", "L6GQFC24.298")
-    result.setdefault("OLT_SW_VERSION_SHORT", "24.6")
-    result.setdefault("AG_SW_VERSION", "V600R008C10")
+
+    # ⭐ REMOVED: No hardcoded SW versions, no hardcoded IPs, no hardcoded VLANs
+    # ⭐ REMOVED: No hardcoded OLT_SITE, AN_SITE, AG nodes, VSI names, VC IDs
 
     return result
