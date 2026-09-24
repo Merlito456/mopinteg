@@ -1,177 +1,180 @@
 """
 Replace the {{ewp_image}} placeholder in a DOCX with an uploaded image.
 
-Fixes:
-- Rewinds the image stream before each insert (python-docx consumes the stream)
-- Stops after the FIRST successful insertion (placeholders are unique)
-- Handles placeholders inside tables, headers, footers, and text boxes
+Handles:
+- Placeholders in body paragraphs, tables, nested tables, headers, footers
+- Multiple placeholders (replaces each with a FRESH stream)
+- Image format conversion (WEBP, HEIC, BMP → PNG) if needed
+- Stream re-creation for each insertion
 """
 from docx import Document
 from docx.shared import Inches
 from io import BytesIO
+import tempfile
+import os
 
 
-def _rewind(image_stream):
-    """Rewind a BytesIO or file-like stream to the start."""
+# ============================================================
+# Image normalization — ensure python-docx can read it
+# ============================================================
+def _normalize_image_bytes(image_bytes: bytes) -> bytes:
+    """
+    Ensure the image bytes are in a format python-docx can read.
+    If Pillow can open it, re-encode as PNG for maximum compatibility.
+    """
     try:
-        image_stream.seek(0)
+        from PIL import Image
+    except ImportError:
+        # Pillow not available — assume bytes are already valid
+        return image_bytes
+
+    try:
+        img = Image.open(BytesIO(image_bytes))
+        # Force load to validate
+        img.load()
+
+        # Convert to RGB/RGBA (handles paletted images, CMYK, etc.)
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGBA")
+
+        # Re-encode as PNG for consistency
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
     except Exception:
-        pass
+        # If Pillow can't read it either, return original
+        return image_bytes
 
 
+# ============================================================
+# Stream factory — creates a FRESH BytesIO each time
+# ============================================================
+def _make_stream_factory(image_bytes: bytes):
+    """
+    Returns a function that creates a fresh BytesIO stream on each call.
+    Use this to insert the SAME image in multiple places.
+    """
+    def factory():
+        return BytesIO(image_bytes)
+    return factory
+
+
+# ============================================================
+# Paragraph-level image insertion
+# ============================================================
 def _insert_image_in_paragraph(paragraph, image_stream):
-    """Insert image at the end of the paragraph. Rewinds stream first."""
-    _rewind(image_stream)
+    """Insert image at the end of the paragraph."""
     run = paragraph.add_run()
     run.add_picture(image_stream, width=Inches(6.0))
 
 
-def _find_and_replace_image_in_paragraph(paragraph, image_stream):
+def _find_and_replace_image_in_paragraph(paragraph, stream_factory):
     """
-    If paragraph contains {{ewp_image}}, replace it with the image.
-    Returns True if replacement happened.
+    If paragraph contains {{ewp_image}}, replace with a fresh image stream.
+
+    Args:
+        paragraph: python-docx paragraph
+        stream_factory: callable that returns a NEW BytesIO each time
+
+    Returns:
+        True if replacement happened, False otherwise
     """
     full_text = "".join(r.text for r in paragraph.runs)
     if "{{ewp_image}}" not in full_text:
         return False
 
-    # Clear text from existing runs
+    # Clear existing text in runs
     for run in paragraph.runs:
         run.text = ""
 
-    _insert_image_in_paragraph(paragraph, image_stream)
+    # Insert image using a FRESH stream
+    stream = stream_factory()
+    _insert_image_in_paragraph(paragraph, stream)
     return True
 
 
-def _replace_in_table(table, image_stream, state):
-    """
-    Recursively replace in tables.
-    Uses `state` dict to track whether replacement already happened.
-    """
-    if state.get("replaced"):
-        return
+# ============================================================
+# Table-level image replacement
+# ============================================================
+def _replace_in_table(table, stream_factory):
+    """Recursively process tables — pass stream_factory, not a shared stream."""
+    replaced_any = False
 
     for row in table.rows:
         for cell in row.cells:
             for paragraph in cell.paragraphs:
-                if _find_and_replace_image_in_paragraph(paragraph, image_stream):
-                    state["replaced"] = True
-                    return
+                if _find_and_replace_image_in_paragraph(paragraph, stream_factory):
+                    replaced_any = True
+            # Handle nested tables
             for nested in cell.tables:
-                _replace_in_table(nested, image_stream, state)
-                if state.get("replaced"):
-                    return
+                if _replace_in_table(nested, stream_factory):
+                    replaced_any = True
+
+    return replaced_any
 
 
-def _replace_in_text_boxes(doc, image_stream, state):
-    """
-    Handle text boxes / shapes via raw XML.
-    Inserts the image inside the text box paragraph if {{ewp_image}} found.
-    """
-    from docx.oxml.ns import qn
-
-    if state.get("replaced"):
-        return
-
-    for txbx in doc.element.body.iter(qn("w:txbxContent")):
-        for para_elem in txbx.iter(qn("w:p")):
-            runs = list(para_elem.iter(qn("w:t")))
-            if not runs:
-                continue
-            full_text = "".join(r.text or "" for r in runs)
-            if "{{ewp_image}}" not in full_text:
-                continue
-
-            # Clear existing text
-            for r in runs:
-                r.text = ""
-
-            # NOTE: python-docx can't easily insert images into raw XML paragraphs
-            # So we fall back to leaving a marker — handled at higher level if needed.
-            # In practice, {{ewp_image}} should be in a regular paragraph, not text box.
-            state["replaced"] = True
-            return
-
-
+# ============================================================
+# Main entry point
+# ============================================================
 def replace_ewp_image(docx_path, image_stream, output_path):
     """
-    Replace the {{ewp_image}} placeholder in a DOCX file.
+    Replace {{ewp_image}} placeholders in the DOCX with the uploaded image.
 
     Args:
-        docx_path: Input DOCX path
-        image_stream: BytesIO or file-like object with image bytes
-        output_path: Output DOCX path
+        docx_path: Path to input DOCX
+        image_stream: BytesIO containing the EWP image
+        output_path: Path to save output DOCX
 
     Returns:
         (output_path, replaced: bool)
     """
-    # Convert image bytes to a fresh BytesIO for safety
-    try:
-        image_stream.seek(0)
-        image_bytes = image_stream.read()
-        image_stream.seek(0)
-    except Exception:
-        image_bytes = None
+    # Read the image bytes ONCE and normalize format
+    image_stream.seek(0)
+    raw_bytes = image_stream.read()
 
-    def fresh_stream():
-        """Return a NEW BytesIO for each insertion attempt."""
-        if image_bytes is not None:
-            return BytesIO(image_bytes)
-        _rewind(image_stream)
-        return image_stream
+    # Normalize to ensure python-docx can read it
+    image_bytes = _normalize_image_bytes(raw_bytes)
 
+    # Create a factory that produces FRESH streams for each insertion
+    stream_factory = _make_stream_factory(image_bytes)
+
+    # Load the DOCX
     doc = Document(docx_path)
-    state = {"replaced": False}
+
+    replaced = False
 
     # 1. Body paragraphs
     for paragraph in doc.paragraphs:
-        if state["replaced"]:
-            break
-        if _find_and_replace_image_in_paragraph(paragraph, fresh_stream()):
-            state["replaced"] = True
+        if _find_and_replace_image_in_paragraph(paragraph, stream_factory):
+            replaced = True
 
-    # 2. Tables (recursive)
-    if not state["replaced"]:
-        for table in doc.tables:
-            _replace_in_table(table, fresh_stream(), state)
-            if state["replaced"]:
-                break
+    # 2. Tables (including nested)
+    for table in doc.tables:
+        if _replace_in_table(table, stream_factory):
+            replaced = True
 
-    # 3. Headers and footers
-    if not state["replaced"]:
-        for section in doc.sections:
-            for header in [section.header, section.first_page_header, section.even_page_header]:
-                if header and not state["replaced"]:
-                    for paragraph in header.paragraphs:
-                        if _find_and_replace_image_in_paragraph(paragraph, fresh_stream()):
-                            state["replaced"] = True
-                            break
-                    if state["replaced"]:
-                        break
-                    for table in header.tables:
-                        _replace_in_table(table, fresh_stream(), state)
-                        if state["replaced"]:
-                            break
-            if state["replaced"]:
-                break
-            for footer in [section.footer, section.first_page_footer, section.even_page_footer]:
-                if footer and not state["replaced"]:
-                    for paragraph in footer.paragraphs:
-                        if _find_and_replace_image_in_paragraph(paragraph, fresh_stream()):
-                            state["replaced"] = True
-                            break
-                    if state["replaced"]:
-                        break
-                    for table in footer.tables:
-                        _replace_in_table(table, fresh_stream(), state)
-                        if state["replaced"]:
-                            break
-            if state["replaced"]:
-                break
+    # 3. Headers & Footers
+    for section in doc.sections:
+        # Headers
+        for header in [section.header, section.first_page_header, section.even_page_header]:
+            if header:
+                for paragraph in header.paragraphs:
+                    if _find_and_replace_image_in_paragraph(paragraph, stream_factory):
+                        replaced = True
+                for table in header.tables:
+                    if _replace_in_table(table, stream_factory):
+                        replaced = True
 
-    # 4. Text boxes (best-effort)
-    if not state["replaced"]:
-        _replace_in_text_boxes(doc, fresh_stream(), state)
+        # Footers
+        for footer in [section.footer, section.first_page_footer, section.even_page_footer]:
+            if footer:
+                for paragraph in footer.paragraphs:
+                    if _find_and_replace_image_in_paragraph(paragraph, stream_factory):
+                        replaced = True
+                for table in footer.tables:
+                    if _replace_in_table(table, stream_factory):
+                        replaced = True
 
+    # Save
     doc.save(output_path)
-    return output_path, state["replaced"]
+    return output_path, replaced
