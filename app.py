@@ -47,7 +47,8 @@ except ImportError:
         embed_excel_as_package = None
         diagnose_placeholder = None
 
-from utils.ai_prompt import GEMINI_PROMPT_TEMPLATE, parse_ai_response
+# ⭐ Dynamic prompt + parser
+from utils.ai_prompt import build_gemini_prompt, parse_ai_response
 
 
 # ============================================================
@@ -69,9 +70,9 @@ TEMPLATE_PATH = "template/MOP_INTEGRATION_TEMPLATE.docx"
 SESSION_DEFAULTS = {
     "placeholder_values": {},
     "fio_uploaded": False,
-    "fio_fingerprint": None,          # ⭐ NEW: tracks current FIO
+    "fio_fingerprint": None,
     "ewp_uploaded": False,
-    "ewp_fingerprint": None,          # ⭐ NEW: tracks current EWP
+    "ewp_fingerprint": None,
     "ewp_image_bytes": None,
     "ewp_ocr_text": "",
     "ewp_candidates": {},
@@ -114,15 +115,9 @@ def reset_fio_state():
     st.session_state.fio_uploaded = False
     st.session_state.fio_parse_debug = None
     st.session_state.fio_fingerprint = None
-    
-    # Clear FIO-sourced placeholder values (keep DOC values)
+
     for p in PLACEHOLDER_MAP:
-        if p["source"] == "FIO":
-            st.session_state.placeholder_values.pop(p["key"], None)
-    
-    # Also clear EWP-sourced values that might come from FIO
-    for p in PLACEHOLDER_MAP:
-        if p["source"] == "EWP":
+        if p["source"] in ("FIO", "EWP"):
             st.session_state.placeholder_values.pop(p["key"], None)
 
 
@@ -133,8 +128,7 @@ def reset_ewp_state():
     st.session_state.ewp_ocr_text = ""
     st.session_state.ewp_candidates = {}
     st.session_state.ewp_fingerprint = None
-    
-    # Clear EWP-sourced placeholder values (keep FIO & DOC values)
+
     for p in PLACEHOLDER_MAP:
         if p["source"] == "EWP":
             st.session_state.placeholder_values.pop(p["key"], None)
@@ -145,11 +139,9 @@ def file_fingerprint(file_obj):
     if file_obj is None:
         return None
     try:
-        # Read bytes for hashing
         file_obj.seek(0)
         data = file_obj.read()
         file_obj.seek(0)
-        # Use name + size + first/last bytes as a lightweight fingerprint
         fp = f"{file_obj.name}::{len(data)}::{hashlib.md5(data[:1024]).hexdigest()[:8]}"
         return fp
     except Exception:
@@ -290,7 +282,6 @@ def build_output_filename():
     """
     sync_all_widgets_to_placeholders()
 
-    # Site name — derived from AN_SITE prefix if not explicitly set
     site_name = get_value_with_fallback("SITE_NAME", "")
     if not site_name:
         an_site = get_value_with_fallback("AN_SITE", "")
@@ -368,18 +359,15 @@ with st.sidebar:
         help="Uploading a new EWP replaces the current session data.",
     )
 
-    # ⭐ FIO FINGERPRINT DETECTION — auto-reset when FIO changes
     if fio_file:
         current_fp = file_fingerprint(fio_file)
         stored_fp = st.session_state.get("fio_fingerprint")
 
         if current_fp and current_fp != stored_fp:
-            # FIO changed → reset FIO state and store new fingerprint
             reset_fio_state()
             st.session_state.fio_fingerprint = current_fp
             st.info("🔄 New FIO detected — re-parsing...")
 
-        # Store FIO bytes for attachment
         if st.session_state.get("fio_attachment_name") != fio_file.name:
             try:
                 fio_file.seek(0)
@@ -390,13 +378,11 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"❌ Failed to read FIO: {e}")
 
-    # ⭐ EWP FINGERPRINT DETECTION — auto-reset when EWP changes
     if ewp_image:
         current_fp = file_fingerprint(ewp_image)
         stored_fp = st.session_state.get("ewp_fingerprint")
 
         if current_fp and current_fp != stored_fp:
-            # EWP changed → reset EWP state and store new fingerprint
             reset_ewp_state()
             st.session_state.ewp_fingerprint = current_fp
             st.info("🔄 New EWP detected — re-parsing...")
@@ -478,7 +464,7 @@ with st.sidebar:
 
 
 # ============================================================
-# PARSE FIO — runs when fingerprint changed OR first upload
+# PARSE FIO
 # ============================================================
 if fio_file and not st.session_state.fio_uploaded:
     with st.spinner("Parsing FIO..."):
@@ -511,7 +497,6 @@ if fio_file and not st.session_state.fio_uploaded:
                 "expected_count": len(expected_keys),
             }
 
-            # ⭐ OVERWRITE existing placeholder_values (don't setdefault)
             for k, v in parsed.items():
                 st.session_state.placeholder_values[k] = v
 
@@ -552,7 +537,6 @@ if ewp_image and not st.session_state.ewp_uploaded:
 
                     applied = 0
                     for k, v in ewp_parsed.items():
-                        # ⭐ OVERWRITE existing values (FIO takes precedence via parse order, but EWP fills gaps)
                         if not st.session_state.placeholder_values.get(k):
                             st.session_state.placeholder_values[k] = v
                             applied += 1
@@ -723,9 +707,19 @@ with tab_ai:
 
     missing_keys = get_missing_keys()
 
+    # ⭐ Build DYNAMIC prompt with ALL placeholders
+    full_prompt = build_gemini_prompt(include_all=True)
+
     st.markdown("### Step 1 — Copy this prompt to Gemini")
 
     if missing_keys:
+        # Build focused prompt for missing fields only
+        focused_lines = []
+        for p in missing_keys:
+            key = p["key"]
+            label = p.get("label", "")
+            focused_lines.append(f'  "{key}": ""   // {label}')
+
         focused_prompt = (
             "CRITICAL OUTPUT INSTRUCTIONS:\n"
             "- Return ONLY a valid JSON object\n"
@@ -736,23 +730,41 @@ with tab_ai:
             "---\n\n"
             "You are an expert network engineer reading a Facility Implementation Order (FIO) "
             "and an Engineering Work Plan (EWP) image for a Nokia Lightspan MF-2 OLT integration.\n\n"
-            "Extract ONLY these fields and return them as a JSON object:\n\n"
+            f"Extract ONLY these {len(missing_keys)} fields and return them as a JSON object:\n\n"
             "{\n"
-            + ",\n".join(f'  "{p["key"]}": ""' for p in missing_keys)
+            + ",\n".join(focused_lines)
             + "\n}\n\n"
             "FIELD DESCRIPTIONS:\n"
             + "\n".join(f'- {p["key"]}: {p["label"]}' for p in missing_keys)
         )
-        st.info(f"💡 **{len(missing_keys)} fields still empty.** Prompt focuses on those fields.")
-        st.code(focused_prompt, language="markdown")
-        st.markdown("#### 📋 Or copy this JSON template directly")
-        st.code(json.dumps({p["key"]: "" for p in missing_keys}, indent=2), language="json")
-    else:
-        st.success("✅ All fields already filled! Full prompt shown for reference.")
-        st.code(GEMINI_PROMPT_TEMPLATE, language="markdown")
 
-    with st.expander("🔍 Show full prompt (all fields)", expanded=False):
-        st.code(GEMINI_PROMPT_TEMPLATE, language="markdown")
+        st.info(
+            f"💡 **{len(missing_keys)} fields still empty.** "
+            f"Prompt focuses on those fields. "
+            f"(Total available: **{len(PLACEHOLDER_MAP)}** placeholders)"
+        )
+        st.code(focused_prompt, language="markdown")
+
+        st.markdown("#### 📋 Or copy this JSON template directly")
+        st.code(
+            json.dumps({p["key"]: "" for p in missing_keys}, indent=2),
+            language="json",
+        )
+    else:
+        st.success(
+            f"✅ All **{len(PLACEHOLDER_MAP)}** placeholders are filled!"
+        )
+
+    # Full prompt with ALL placeholders
+    with st.expander(
+        f"🔍 Show FULL prompt (all {len(PLACEHOLDER_MAP)} placeholders)",
+        expanded=False,
+    ):
+        st.code(full_prompt, language="markdown")
+        st.caption(
+            f"This prompt includes all {len(PLACEHOLDER_MAP)} placeholders. "
+            "Use this when you want Gemini to extract every field in one pass."
+        )
 
     st.markdown("### Step 2 — Upload FIO + EWP to Gemini, then paste the response below")
 
